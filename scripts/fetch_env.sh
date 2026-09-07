@@ -45,6 +45,12 @@ esac
 
 is_in() { local n="$1"; shift; for e in "$@"; do [[ "$e" == "$n" ]] && return 0; done; return 1; }
 
+die_bad_checksum() {
+  echo "[ERROR] The nested archive failed its sha256 check. The download is" >&2
+  echo "        corrupt; delete it from downloads/ and re-run." >&2
+  exit 1
+}
+
 if ! is_in "$ENV_NAME" "${SINGLE_ENVS[@]}" && ! is_in "$ENV_NAME" "${SPLIT_ENVS[@]}"; then
   echo "[ERROR] Unknown environment: $ENV_NAME" >&2; echo >&2; usage >&2; exit 1
 fi
@@ -76,19 +82,42 @@ fi
 # The archives unpack to Linux/<Name>.sh + Linux/<Name>/. Flatten that one level
 # so every environment ends up as envs/<Name>/<Name>.sh, which is the layout the
 # sim container's entrypoint expects.
+#
+# Some releases (CityEnviron in v0.3.0) ship a zip containing *another* zip plus
+# a manifest and a .sha256, so unpacking has to recurse and verify.
 tmp="${ENVS}/.unpack_${ENV_NAME}_$$"
 echo "[info] Extracting into ${ENVS}/${ENV_NAME} ..."
 rm -rf "$tmp"; mkdir -p "$tmp"
 unzip -q "$zip_path" -d "$tmp"
 
+# Nested archive: verify it against its checksum, then unpack it in place.
+inner="$(find "$tmp" -maxdepth 2 -name '*.zip' -type f | head -n1)"
+if [[ -n "$inner" ]]; then
+  echo "[info] Found a nested archive: $(basename "$inner")"
+  if [[ -f "${inner}.sha256" ]]; then
+    echo "[info] Verifying sha256 ..."
+    ( cd "$(dirname "$inner")" && sha256sum -c "$(basename "$inner").sha256" ) \
+      || die_bad_checksum
+  else
+    echo "[warn] No .sha256 alongside the nested archive; skipping verification."
+  fi
+  inner_dir="${tmp}/.inner"
+  mkdir -p "$inner_dir"
+  unzip -q "$inner" -d "$inner_dir"
+  # Keep the manifests, drop the 3GB archive we have already unpacked.
+  find "$tmp" -maxdepth 2 -name '*.manifest.json' -exec mv {} "$inner_dir/" \; 2>/dev/null || true
+  rm -f "$inner" "${inner}.sha256"
+  tmp="$inner_dir"
+fi
+
 if [[ -d "${tmp}/Linux" ]]; then
   mv "${tmp}/Linux" "${ENVS}/${ENV_NAME}"
   # Keep the build manifest alongside the payload.
-  find "$tmp" -maxdepth 1 -type f -exec mv {} "${ENVS}/${ENV_NAME}/" \;
+  find "$tmp" -maxdepth 1 -type f -exec mv {} "${ENVS}/${ENV_NAME}/" \; 2>/dev/null || true
 else
   mv "$tmp" "${ENVS}/${ENV_NAME}"
 fi
-rm -rf "$tmp"
+rm -rf "${ENVS}/.unpack_${ENV_NAME}_$$"
 
 chmod +x "${ENVS}/${ENV_NAME}/${ENV_NAME}.sh" 2>/dev/null || true
 chmod +x "${ENVS}/${ENV_NAME}/${ENV_NAME}/Binaries/Linux/"* 2>/dev/null || true
