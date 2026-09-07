@@ -310,9 +310,10 @@ leave behind.
 | UE 5.2 engine built | done — installed build 51 GB |
 | Plugin build path verified | done — §7, CMake configures |
 | Baseline plugin/simlibs build | done |
-| Fisheye implementation | **written; core_sim compiles, plugin build in progress** |
-| Repackaged environment with fisheye | in progress (`package_blocks_shipping`) |
-| Fisheye verified against rendered images | **not yet** |
+| Fisheye implementation | done |
+| Repackaged environment with fisheye | done — `envs/BlocksFisheye`, via `scripts/install_env.sh` |
+| Fisheye verified against rendered images | **done** — §8.2 |
+| 30 Hz at four eyes | **not met** — 23.1 Hz; §8.4 has the reason and the route |
 
 ### 8.1 What was implemented
 
@@ -343,12 +344,66 @@ Perspective-only helpers are clamped rather than corrected:
 through a perspective matrix is not meaningful for a fisheye image and is not
 attempted.
 
-### 8.2 Still to verify
+### 8.2 Verified against rendered frames
 
-Nothing below has been checked against a rendered image yet:
+Captured through the ROS2 bridge with `workspace/grab_frames.py`, four eyes at
+640x640, 220 degrees, equidistant, in the locally-built Blocks:
 
-* that the composite is written at all (the `bCanCreateUAV` re-init path)
-* seam continuity between faces
-* that the image circle radius matches `(width/2)` and the published `fx`
-* that `GetRay` (`camera.cpp:868`) is consistent with the equidistant model —
-  §6 item 5 predicts it already is, but that is unverified
+| Check | Result |
+| --- | --- |
+| Composite is written | yes — real content inside the circle on all four eyes |
+| Image circle radius | exactly `width/2` = 320 px; **100.0%** of the area outside it is pure black |
+| Circle boundary | hard cliff, luminance 92 -> 0 across r = 320 |
+| Seam continuity | step across the 45-degree face seam is 0.5-1.5x the typical radial step, i.e. no discontinuity |
+| Rendered focal length | 320 / 1.9199 = **166.68 px/rad** by construction |
+
+The frames also show the drone's own rotors and arms at the left and right
+extremes. That is correct, not a bug: at 220 degrees the camera sees 20 degrees
+*behind* its own mounting plane, so a real lens would see the airframe too.
+Increase `--mount-radius` to push it out, or mask the affected annulus for VIO
+use.
+
+### 8.3 Still to verify
+
+* **The published `camera_info` intrinsics.** `core_sim` publishes those once at
+  scene load on a non-latched topic, so by the time a ROS subscriber attaches
+  the message is gone; `ros2 topic hz` on the info topic reports nothing. The
+  rendered geometry is confirmed and both values come from the same expression,
+  but that the published `fx` equals 166.68 has not been observed. Making that
+  topic latched (`transient_local`) upstream would fix the observability.
+* `GetRay` (`camera.cpp:868`) consistency with the equidistant model — §6 item 5
+  predicts it already holds.
+
+---
+
+## 8.4 Measured cost, and why 30 Hz is still short
+
+Four 220-degree eyes at 640x640 in Blocks, flying:
+
+| Faces per eye | Camera rate | IMU |
+| --- | --- | --- |
+| 512 px | 23.14 Hz | 199.99 Hz |
+| **768 px** | **23.11 Hz** | 199.98 Hz |
+| 1024 px | 20.31 Hz | 200.04 Hz |
+
+**Face resolution is almost free between 512 and 768** and costs 12% at 1024, so
+768 is the operating point: it is the best quality available at no measurable
+cost over 512.
+
+That flatness is the point. 20 face captures per frame set at ~2.1 ms of fixed
+cost each is 42 ms, or 23.8 Hz — which is what is measured. The wall is the
+*number of scene captures*, not their pixels, exactly as section 2 predicted for
+the per-camera cost.
+
+So the lever for 30 Hz is fewer renderers, not smaller faces. The route
+identified while reading the engine: UE 5.2 already supports **N views inside
+one `FSceneViewFamily` and one `FSceneRenderer`** — the planar-reflection path
+does precisely that (`PlanarReflectionRendering.cpp:634-649`), and
+`SetupViewFamilyForSceneCapture` takes a `TArrayView` of views, with only the
+*cube* path constrained to one. Rendering an eye's five faces as five views of a
+single scene renderer, into one atlased target, would collapse 20 renderers to
+4. That is the next optimisation, and it is not attempted here.
+
+Making the readback asynchronous (`FRHIGPUTextureReadback`, avoiding the
+`vkDeviceWaitIdle` inside `RHIReadSurfaceData`) is a separate win, but a smaller
+one now: compositing in the plugin already cut readbacks from 20 to 4.
