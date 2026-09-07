@@ -89,6 +89,12 @@ services:
       SCENE_CONFIG: ${SCENE_CONFIG:-}
       SIM_CONFIG_PATH: ${SIM_CONFIG_PATH:-/workspace/workspace/sim_config}
       VEHICLE_NAME: ${VEHICLE_NAME:-Drone1}
+      # Leave at 0. The bridge's refresh timer only re-reads a client-side cache
+      # (Topics::GetAll sends nothing to the sim) and every topic is already in
+      # subscribed_topics_, so it cannot recover from a sim restart -- but its
+      # requests do collide with service calls on the single Req0 socket and
+      # produce "Incorrect state" errors. Recovery is the supervisor's job.
+      REFRESH_TOPICS_SEC: ${REFRESH_TOPICS_SEC:-0.0}
       FOXGLOVE_PORT: 8765
       ROS_DOMAIN_ID: ${ROS_DOMAIN_ID:-0}
 

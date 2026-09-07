@@ -25,6 +25,10 @@ SIM_ADDRESS="${SIM_ADDRESS:-sim}"
 SCENE_CONFIG="${SCENE_CONFIG:-}"
 SIM_CONFIG_PATH="${SIM_CONFIG_PATH:-/workspace/workspace/sim_config}"
 FOXGLOVE_PORT="${FOXGLOVE_PORT:-8765}"
+# Periodic topic re-discovery. Off by default: it re-reads a client-side cache
+# and re-subscribes to nothing (see HANDOFF.md), while its requests collide
+# with service calls on the shared Req0 socket.
+REFRESH_TOPICS_SEC="${REFRESH_TOPICS_SEC:-0.0}"
 
 build_ws() {
   echo "[info] Building ${PKG} (this takes a few minutes the first time) ..."
@@ -63,9 +67,15 @@ ensure_built() {
 }
 
 run_projectairsim_bridge() {
+  # The parameter is declared as a double, so "0" is rejected outright with
+  # "setting it to {integer} is not allowed". Force a decimal point.
+  local refresh_sec="$REFRESH_TOPICS_SEC"
+  [[ "$refresh_sec" == *.* ]] || refresh_sec="${refresh_sec}.0"
+
   local args=(
     -p "address:=${SIM_ADDRESS}"
     -p "sim_config_path:=${SIM_CONFIG_PATH}"
+    -p "refresh_topics_period_sec:=${refresh_sec}"
   )
   # With no scene_config the bridge attaches to whatever scene is already
   # loaded instead of replacing it.
