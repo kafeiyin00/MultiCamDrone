@@ -26,14 +26,33 @@ UPSTREAM = os.path.join(
 )
 OUT_DIR = os.path.join(REPO, "workspace", "sim_config")
 
-# Four eyes on a square baseline, each looking outward along its own axis.
-# xyz is body-frame NED in metres: +x forward, +y right, +z down.
-EYES = {
-    "front": {"xyz": (0.10, 0.00, 0.00), "yaw": 0},
-    "right": {"xyz": (0.00, 0.10, 0.00), "yaw": 90},
-    "back": {"xyz": (-0.10, 0.00, 0.00), "yaw": 180},
-    "left": {"xyz": (0.00, -0.10, 0.00), "yaw": -90},
-}
+# Four eyes, each looking outward along a body axis.
+#
+# Mounting geometry matters more than it looks. The quadrotor's rotors sit on the
+# diagonals at (+/-0.253, +/-0.253) in robot_quadrotor_fastphysics.jsonc, so the
+# four body axes (+x forward, +y right, -x back, -y left) pass cleanly BETWEEN
+# the arms and the propeller discs -- which is why the cameras point along the
+# axes rather than the diagonals.
+#
+# The radius still has to clear the frame mesh, though. At 0.10 m the cameras sit
+# inside the body and the drone occludes its own view. MOUNT_RADIUS pushes them
+# out past the frame while staying inboard of the rotor tips.
+#
+# A wide lens will always catch some of the airframe at the rim: a 220-degree
+# camera sees 110 degrees off-axis, i.e. 20 degrees *behind* its own mounting
+# point. Real multi-fisheye drones live with that. MOUNT_Z drops the cameras
+# slightly below the frame plane so the body and props fall at the very edge of
+# the circle instead of across the middle of it.
+MOUNT_RADIUS = 0.30   # metres from the body origin, along each axis
+MOUNT_Z = 0.06        # metres below the frame plane (NED: +z is down)
+
+def eye_positions(radius, mount_z):
+    return {
+        "front": {"xyz": (radius, 0.0, mount_z), "yaw": 0},
+        "right": {"xyz": (0.0, radius, mount_z), "yaw": 90},
+        "back": {"xyz": (-radius, 0.0, mount_z), "yaw": 180},
+        "left": {"xyz": (0.0, -radius, mount_z), "yaw": -90},
+    }
 
 
 def strip_jsonc(text: str) -> str:
@@ -94,7 +113,16 @@ def main() -> int:
                     help="IMU Hz; this sets the scene clock, which also caps "
                          "the physics rate")
     ap.add_argument("--name", default="multicam_drone")
+    ap.add_argument("--mount-radius", type=float, default=MOUNT_RADIUS,
+                    help="metres from the body origin along each axis; must clear "
+                         "the frame mesh or the drone occludes its own cameras "
+                         f"(default {MOUNT_RADIUS})")
+    ap.add_argument("--mount-z", type=float, default=MOUNT_Z,
+                    help="metres below the frame plane, NED (+z down); keeps the "
+                         f"airframe at the rim of a wide FOV (default {MOUNT_Z})")
     args = ap.parse_args()
+
+    eyes = eye_positions(args.mount_radius, args.mount_z)
 
     if args.projection == "perspective" and args.fov >= 180:
         print(f"error: fov {args.fov} is impossible for a perspective camera -- "
@@ -110,7 +138,7 @@ def main() -> int:
     if not imu:
         print("error: no IMU found in the upstream robot config", file=sys.stderr)
         return 1
-    robot["sensors"] = imu + [camera(n, e, args) for n, e in EYES.items()]
+    robot["sensors"] = imu + [camera(n, e, args) for n, e in eyes.items()]
 
     scene = load_upstream("scene_basic_drone.jsonc")
     scene["id"] = f"Scene{args.name.title().replace('_', '')}"
@@ -127,8 +155,15 @@ def main() -> int:
     with open(scene_path, "w") as fh:
         json.dump(scene, fh, indent=2)
 
-    print(f"  cameras   : {len(EYES)} x {args.width}x{args.height} "
+    print(f"  cameras   : {len(eyes)} x {args.width}x{args.height} "
           f"@{args.rate:g}Hz, {args.projection}, fov {args.fov:g} deg")
+    print(f"  mounting  : radius {args.mount_radius:g}m, {args.mount_z:g}m below "
+          f"the frame plane (rotors are on the diagonals at +/-0.253m)")
+    frame_bytes = args.width * args.height * 3
+    if frame_bytes > 4 * 1024 * 1024:
+        print(f"  NOTE      : {frame_bytes} bytes/frame exceeds UE's 4 MiB pooling")
+        print(f"              threshold, so each frame leaks a VMA. Needs")
+        print(f"              vm.max_map_count raised well above 65530.")
     if args.projection == "fisheye":
         print(f"  model     : {args.fisheye_model}")
     print(f"  IMU       : {args.imu_rate:g}Hz (scene clock step {step_ns} ns)")

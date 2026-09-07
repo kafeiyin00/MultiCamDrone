@@ -67,7 +67,14 @@ services:
 
     stdin_open: true
     tty: true
-    restart: "no"
+    # The container exits when Unreal crashes (PID 1 is `sh <Env>.sh`, which
+    # propagates 128+11), so a restart policy genuinely recovers it. This is what
+    # was missing when a vm.max_map_count exhaustion killed the sim and it stayed
+    # down, leaving the bridge serving a stale topic list to Foxglove.
+    restart: unless-stopped
+    # Bound the sim's memory so a runaway cannot take the host with it. Steady
+    # state is ~1.2GB for Blocks, ~4GB for CityEnviron.
+    mem_limit: ${SIM_MEM_LIMIT:-24g}
 
   # ---------------------------------------------------------------------------
   # ROS2 bridge + Foxglove WebSocket
@@ -116,6 +123,11 @@ services:
 
     stdin_open: true
     tty: true
+    # The bridge cannot recover from a sim restart on its own: subscription state
+    # lives in the sim process, and the bridge never re-sends a subscribe frame,
+    # so its topics go permanently mute while the node keeps spinning without
+    # logging anything. A fresh process is the only fix, so let it restart.
+    restart: unless-stopped
     # Run both the Project AirSim bridge and foxglove_bridge in one container.
     command: ["both"]
 
