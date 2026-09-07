@@ -1,0 +1,107 @@
+# =============================================================================
+# MultiCamDrone - Project AirSim docker environment
+#
+#   docker compose build                      # build both images
+#   docker compose up -d sim                  # start the simulator (headless)
+#   docker compose run --rm client bash       # shell with the python client
+#   docker compose logs -f sim                # watch the Unreal log
+#   docker compose down                       # stop everything
+#
+# The simulator publishes its two API ports on the host, so a client running
+# directly on the host (outside docker) works too, against 127.0.0.1.
+# =============================================================================
+
+name: multicamdrone
+
+services:
+
+  # ---------------------------------------------------------------------------
+  # Unreal Engine simulation server
+  # ---------------------------------------------------------------------------
+  sim:
+    build:
+      context: ./sim
+      args:
+        USER_UID: ${USER_UID:-1000}
+        USER_GID: ${USER_GID:-1000}
+    image: multicamdrone/airsim-sim:latest
+    container_name: airsim-sim
+
+    # GPU access. NVIDIA_DRIVER_CAPABILITIES (set in the Dockerfile and below)
+    # is what actually pulls in the graphics/Vulkan driver bits — `capabilities:
+    # [gpu]` alone only gives compute+utility.
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+
+    environment:
+      NVIDIA_VISIBLE_DEVICES: all
+      NVIDIA_DRIVER_CAPABILITIES: compute,utility,graphics,display
+      SIM_ENV_ROOT: /environments
+      SIM_ENV_NAME: ${SIM_ENV_NAME:-Blocks}
+      SIM_RENDER_MODE: ${SIM_RENDER_MODE:-offscreen}   # offscreen | nullrhi | windowed
+      SIM_RES_X: ${SIM_RES_X:-1280}
+      SIM_RES_Y: ${SIM_RES_Y:-720}
+      SIM_TOPICS_PORT: 8989
+      SIM_SERVICES_PORT: 8990
+      SIM_EXTRA_ARGS: ${SIM_EXTRA_ARGS:-}
+
+    volumes:
+      # Packaged environments. Writable: Unreal drops its Saved/ logs in here.
+      - ../envs:/environments
+      # Shared drop box for images/logs produced by the sim.
+      - ../output:/output
+
+    ports:
+      - "${SIM_BIND_ADDR:-127.0.0.1}:8989:8989"   # topics  (pub/sub)
+      - "${SIM_BIND_ADDR:-127.0.0.1}:8990:8990"   # services (req/resp)
+
+    # Unreal is happier with a large shared-memory segment than docker's 64MB.
+    shm_size: "2gb"
+    ulimits:
+      nofile: { soft: 65536, hard: 65536 }
+
+    stdin_open: true
+    tty: true
+    restart: "no"
+
+  # ---------------------------------------------------------------------------
+  # Python client
+  # ---------------------------------------------------------------------------
+  client:
+    build:
+      context: ./client
+      args:
+        BASE_IMAGE: ${CLIENT_BASE_IMAGE:-ubuntu:22.04}
+        USER_UID: ${USER_UID:-1000}
+        USER_GID: ${USER_GID:-1000}
+    image: multicamdrone/airsim-client:latest
+    container_name: airsim-client
+
+    environment:
+      # Inside the compose network the simulator answers to the name "sim".
+      SIM_ADDRESS: sim
+      PROJECTAIRSIM_REPO: /workspace/ProjectAirSim
+      DISPLAY: ${DISPLAY:-}
+      PYTHONPATH: /workspace/ProjectAirSim/client/python/projectairsim/src
+
+    volumes:
+      # The whole MultiCamDrone repo, so scripts and the client package are
+      # edited on the host and picked up in the container with no rebuild.
+      - ..:/workspace
+      - ../output:/output
+      # X11 socket, so cv2.imshow() windows from the examples appear on the host
+      # desktop. Harmless when DISPLAY is unset.
+      - /tmp/.X11-unix:/tmp/.X11-unix:rw
+
+    working_dir: /workspace/ProjectAirSim/client/python/example_user_scripts
+
+    depends_on:
+      - sim
+
+    stdin_open: true
+    tty: true

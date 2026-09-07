@@ -1,0 +1,46 @@
+# =============================================================================
+# MultiCamDrone - ignored paths
+# =============================================================================
+
+# --- Large binary assets: pre-built Unreal environments and their archives ---
+# These are multi-GB downloads from the Project AirSim releases page and are
+# re-fetchable with scripts/fetch_env.sh, so they stay out of git.
+/downloads/
+/envs/
+
+# --- Unreal runtime output written next to / inside the packaged envs ---
+Saved/
+Intermediate/
+DerivedDataCache/
+*.log
+
+# --- Simulation output captured by client scripts ---
+/output/
+/data/
+*.mp4
+*.avi
+
+# --- Python ---
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+.venv/
+venv/
+.pytest_cache/
+.ipynb_checkpoints/
+
+# --- Editors / OS ---
+.vscode/*
+!.vscode/settings.json
+!.vscode/launch.json
+!.vscode/extensions.json
+.idea/
+*.swp
+.DS_Store
+
+# --- Local, machine-specific docker overrides ---
+/docker/.env
+docker-compose.override.yml
