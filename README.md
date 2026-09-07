@@ -42,17 +42,18 @@ Vulkan, running server, client round trip — and tells you which one is broken.
 ## Architecture
 
 ```
-  ┌────────────────────────────┐         ┌────────────────────────────┐
-  │  airsim-sim                │         │  airsim-client             │
-  │                            │  8989   │                            │
-  │  Unreal Engine 5.2         │◄────────┤  projectairsim (Python)    │
-  │  Blocks-Linux-Shipping     │ topics  │  your scripts              │
-  │  -RenderOffScreen          │         │                            │
-  │                            │  8990   │                            │
-  │  Vulkan → NVIDIA GPU       │◄────────┤                            │
-  └────────────────────────────┘services └────────────────────────────┘
-            │                                        │
-            └──── ../envs, ../output ────────────────┴──── .. (whole repo)
+                            ┌────────────────────────────┐
+                            │  airsim-client             │
+                       8989 │  projectairsim (Python)    │
+  ┌──────────────────────┐◄─┤  your scripts              │
+  │  airsim-sim          │  └────────────────────────────┘
+  │                      │  ┌────────────────────────────┐
+  │  Unreal Engine 5.2   │  │  airsim-ros2               │
+  │  -RenderOffScreen    │◄─┤  projectairsim_ros2_cpp    │
+  │                      │  │            ↓               │  8765
+  │  Vulkan → NVIDIA GPU │  │  foxglove_bridge           │──────► Foxglove
+  └──────────────────────┘  └────────────────────────────┘   ws://
+       8990 services
 ```
 
 * **8989 — topics.** Pub/sub: sensor images, poses, telemetry.
@@ -95,6 +96,69 @@ docker compose -f docker/docker-compose.yml down
 Local settings live in `docker/.env` (git-ignored; `docker/.env.example` is the
 template): which environment to launch, render mode, resolution, the address
 the API ports bind to, and the client image's base.
+
+---
+
+## ROS2 and Foxglove
+
+`docker/ros2/` runs the upstream `projectairsim_ros2_cpp` bridge next to
+`foxglove_bridge`. The bridge speaks the native Project AirSim protocol and
+republishes sensors as typed ROS2 messages; `foxglove_bridge` serves them over
+a WebSocket.
+
+```bash
+docker compose -f docker/docker-compose.yml up -d sim ros2
+# then connect Foxglove to  ws://<host>:8765
+```
+
+The colcon workspace builds on first start into `ProjectAirSim/ros/{build,install,log}`
+(git-ignored), so edits to the bridge rebuild without touching the image.
+
+```bash
+# Rebuild the workspace after editing the bridge
+docker compose -f docker/docker-compose.yml run --rm --no-deps ros2 build
+
+# Poke at the topics
+docker compose -f docker/docker-compose.yml exec ros2 bash
+ros2 topic list
+ros2 topic hz /ProjectAirsim/Drone1/front/scene_camera
+```
+
+Settings worth knowing:
+
+| Variable | Effect |
+| --- | --- |
+| `SCENE_CONFIG` | Empty (default) means *attach to the scene already loaded*. Set it to have the bridge load a scene itself. |
+| `SIM_CONFIG_PATH` | Where scene/robot configs are resolved from. Defaults to `workspace/sim_config`. |
+| `USE_SHM_PROFILE=1` | Enables the 256 MB Fast DDS shared-memory profile. Needed for 1080p images at 30 Hz, **but it disables UDP**, so subscribers must run in the same container. |
+
+A raw 1920×1080 BGR frame is about 6 MB; four of them at 30 Hz is ~750 MB/s,
+which is past Fast DDS's default shared-memory segment. If image topics stall
+or drop, that profile is the first thing to try.
+
+---
+
+## The four-camera rig
+
+`scripts/make_rig_config.py` generates the robot and scene configs for a
+four-camera rig — front, right, back, left — plus the scene clock that sets the
+IMU rate:
+
+```bash
+./scripts/make_rig_config.py                              # 4 × 1920×1080 @30Hz, 150° 
+./scripts/make_rig_config.py --rate 30 --imu-rate 200
+./scripts/make_rig_config.py --projection fisheye --fov 220   # needs the modified plugin
+```
+
+Two things the generator encodes, both measured on this host:
+
+* **The IMU has no rate of its own.** It publishes on the scene tick, so
+  `--imu-rate` sets `clock.step-ns`, which also caps the physics rate. 5 ms
+  gives exactly 200.0 Hz.
+* **A perspective camera cannot exceed 180°.** `fx = width / (2·tan(fov/2))`
+  goes negative past 180, and the simulator raises no error — it just renders
+  something that does not match the config. The generator refuses instead.
+  True 220° needs the in-engine fisheye path described in `HANDOFF.md`.
 
 ---
 

@@ -8,7 +8,12 @@
 #   build               build the workspace and exit
 #   bash / anything     run that command with ROS2 sourced
 # -----------------------------------------------------------------------------
-set -euo pipefail
+set -eo pipefail
+
+# ROS2's setup scripts reference unset variables (AMENT_TRACE_SETUP_FILES and
+# friends), so -u has to be off while they run. Keep it off for the whole
+# script rather than toggling it around every source site.
+set +u
 
 source /opt/ros/humble/setup.bash
 
@@ -33,10 +38,17 @@ build_ws() {
 }
 
 ensure_built() {
-  if [[ ! -f "${ROS_WS}/install/${PKG}/share/${PKG}/package.sh" \
-     && ! -f "${ROS_WS}/install/setup.bash" ]]; then
+  # Test for the node binary itself. colcon leaves install/setup.bash behind
+  # even when the build fails, so keying off that would skip the rebuild and
+  # then fail at `ros2 run` with a much less obvious message.
+  local node_bin="${ROS_WS}/install/${PKG}/lib/${PKG}/projectairsim_ros2_cpp_node"
+  if [[ ! -x "$node_bin" ]]; then
     build_ws
   fi
+  [[ -x "$node_bin" ]] || {
+    echo "[ERROR] Build finished but ${node_bin} is missing." >&2
+    exit 1
+  }
   source "${ROS_WS}/install/setup.bash"
 
   # 4 x 1080p BGR at 30Hz is well past Fast DDS's default SHM segment.

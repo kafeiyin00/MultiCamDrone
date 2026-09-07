@@ -18,6 +18,9 @@ ARG USER_GID=1000
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
       build-essential cmake git ninja-build pkg-config \
+      # msgpack (vendored by the Project AirSim C++ client) includes
+      # <boost/predef/other/endian.h>, so Boost headers must be present.
+      libboost-dev \
       python3-colcon-common-extensions python3-vcstool python3-rosdep \
       sudo vim-tiny less procps net-tools iproute2 iputils-ping \
       # --- the WebSocket server Foxglove connects to ---
