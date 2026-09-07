@@ -283,12 +283,29 @@ does not apply.
 
 | Step | State |
 | --- | --- |
-| UE 5.2 source cloned (`engine/UnrealEngine-5.2`, shallow) | done |
-| `Setup.sh` dependency download | running |
-| Installed engine build | not started (~4 h) |
+| UE 5.2 source + `Setup.sh` dependencies (`engine/UnrealEngine-5.2`, 37 GB) | done |
+| Installed engine build | **running** — started 2026-09-07 14:20, 4+ h |
 | Fisheye capture in the plugin | not started |
 | Blocks repackaged with the modified plugin | not started |
-| ROS2 bridge + foxglove_bridge image | built, not yet verified end to end |
+| ROS2 bridge + foxglove_bridge | **done and verified** |
+| Four-camera rig config generator | done |
+
+The ROS2 leg is live: all four cameras, the IMU, and four `camera_info` topics
+are bridged, and Foxglove connects on `ws://<host>:8765`. Verify with
+`./scripts/verify_ros2.sh`.
+
+**Rates have not been measured on an idle machine yet.** The first attempt read
+7.8 Hz on cameras and 82 Hz on the IMU, but the engine build had the load
+average at 58 on 56 cores at the time, so those numbers say nothing. Re-run
+`./scripts/verify_ros2.sh --rates` once the build finishes — the script refuses
+to report rates under load rather than producing figures that get quoted later.
+
+Monitoring the engine build:
+
+```bash
+./scripts/build_engine.sh status
+tail -f /proc/$(pgrep -f InstalledEngineBuild | head -1)/fd/1
+```
 
 `engine/` is git-ignored — it is a quarter-terabyte of build tree.
 
