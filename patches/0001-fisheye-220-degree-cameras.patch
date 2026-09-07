@@ -346,7 +346,7 @@ index 0000000..203947a
 +void DispatchFisheyeRemap(FRHICommandListImmediate& RHICmdList,
 +                          const FFisheyeRemapArgs& Args);
 diff --git a/unreal/Blocks/Plugins/ProjectAirSim/Source/ProjectAirSim/Private/Sensors/UnrealCamera.cpp b/unreal/Blocks/Plugins/ProjectAirSim/Source/ProjectAirSim/Private/Sensors/UnrealCamera.cpp
-index 3800a7c..57e102e 100644
+index 3800a7c..5a21a94 100644
 --- a/unreal/Blocks/Plugins/ProjectAirSim/Source/ProjectAirSim/Private/Sensors/UnrealCamera.cpp
 +++ b/unreal/Blocks/Plugins/ProjectAirSim/Source/ProjectAirSim/Private/Sensors/UnrealCamera.cpp
 @@ -25,6 +25,7 @@
@@ -357,7 +357,7 @@ index 3800a7c..57e102e 100644
  #include "UnrealCameraRenderRequest.h"
  #include "UnrealCompatibility.h"
  #include "UnrealHelpers.h"
-@@ -334,9 +335,186 @@ void UUnrealCamera::SetupCameraFromSettings(
+@@ -334,9 +335,191 @@ void UUnrealCamera::SetupCameraFromSettings(
  
      Capture->TextureTarget = RenderTargets[ImageType];
    }
@@ -394,9 +394,11 @@ index 3800a7c..57e102e 100644
 +    const projectairsim::CaptureSettings& CaptureSetting) {
 +  if (!CaptureSetting.fisheye_enabled || bFisheyeRigBuilt) return;
 +
++  // width/height are `unsigned int` in CaptureSettings, so they need an
++  // explicit cast before FMath::Max can pick an overload against an int.
 +  const int32 FaceRes = FMath::Max(64, CaptureSetting.fisheye_face_resolution);
-+  const int32 OutW = FMath::Max(1, CaptureSetting.width);
-+  const int32 OutH = FMath::Max(1, CaptureSetting.height);
++  const int32 OutW = FMath::Max(1, static_cast<int32>(CaptureSetting.width));
++  const int32 OutH = FMath::Max(1, static_cast<int32>(CaptureSetting.height));
 +
 +  // The radial law and its focal length must match core_sim's camera_info
 +  // exactly, or the published intrinsics will not describe the rendered image.
@@ -479,7 +481,7 @@ index 3800a7c..57e102e 100644
 +  bFisheyeRigBuilt = true;
 +
 +  UnrealLogger::Log(
-+      projectairsim::LogLevel::kInfo,
++      projectairsim::LogLevel::kTrace,
 +      TEXT("[UnrealCamera] Fisheye rig: %d faces at %dx%d -> %dx%d, "
 +           "fov %.1f deg, model %d, f %.2f px/rad"),
 +      kFisheyeFaceCount, FaceRes, FaceRes, OutW, OutH,
@@ -495,8 +497,11 @@ index 3800a7c..57e102e 100644
 +void UUnrealCamera::RemapFisheye(FRHICommandListImmediate& RHICmdList) {
 +  if (!bFisheyeRigBuilt || FisheyeComposite == nullptr) return;
 +
-+  FTextureRenderTargetResource* OutResource =
++  FTextureRenderTargetResource* OutResourceBase =
 +      FisheyeComposite->GetRenderTargetResource();
++  if (OutResourceBase == nullptr) return;
++  FTextureRenderTarget2DResource* OutResource =
++      OutResourceBase->GetTextureRenderTarget2DResource();
 +  if (OutResource == nullptr) return;
 +
 +  FFisheyeRemapArgs Args;
@@ -544,7 +549,7 @@ index 3800a7c..57e102e 100644
  void UUnrealCamera::SetRelativePoseFromNed(
      const projectairsim::Transform& PoseNed) {
    // Apply camera origin offset from the parent (either the parent link or
-@@ -761,7 +939,18 @@ void UUnrealCamera::TickComponent(
+@@ -761,7 +944,18 @@ void UUnrealCamera::TickComponent(
        }
  
        if (bEnable) {
@@ -564,7 +569,7 @@ index 3800a7c..57e102e 100644
          bCaptureIsActive = true;
        }
      }
-@@ -795,6 +984,9 @@ void UUnrealCamera::TickComponent(
+@@ -795,6 +989,9 @@ void UUnrealCamera::TickComponent(
        ENQUEUE_RENDER_COMMAND(SceneDrawCompletion)
        ([this, CapturedCameraTransform, Annotations = std::move(Annotations)](
             FRHICommandListImmediate& RHICmdList) {
@@ -574,7 +579,7 @@ index 3800a7c..57e102e 100644
          this->OnRendered(CapturedCameraTransform, Annotations);
        });
      }
-@@ -1072,7 +1264,10 @@ void UUnrealCamera::CalculateProjectionMatrix() {
+@@ -1072,7 +1269,10 @@ void UUnrealCamera::CalculateProjectionMatrix() {
    ViewInfo.Location = CaptureComp->GetComponentTransform().GetLocation();
    ViewInfo.Rotation =
        CaptureComp->GetComponentTransform().GetRotation().Rotator();
@@ -586,7 +591,7 @@ index 3800a7c..57e102e 100644
    ViewInfo.ProjectionMode = CaptureComp->ProjectionType;
    ViewInfo.AspectRatio =
        float(RenderTexture->SizeX) / float(RenderTexture->SizeY);
-@@ -1094,7 +1289,13 @@ void UUnrealCamera::ComputeFrustumVertices() {
+@@ -1094,7 +1294,13 @@ void UUnrealCamera::ComputeFrustumVertices() {
      FrustumInfo Info;
      USceneCaptureComponent2D* CaptureComp = Captures[ImageType];
  

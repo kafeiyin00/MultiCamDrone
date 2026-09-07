@@ -330,12 +330,15 @@
           "image-type": 0,
           "width": 640,
           "height": 640,
-          "fov-degrees": 150.0,
+          "fov-degrees": 220.0,
           "capture-enabled": true,
           "streaming-enabled": false,
           "pixels-as-float": false,
           "compress": false,
-          "target-gamma": 2.5
+          "target-gamma": 2.5,
+          "projection": "fisheye",
+          "fisheye-model": "equidistant",
+          "fisheye-face-resolution": 768
         }
       ],
       "origin": {
@@ -354,12 +357,15 @@
           "image-type": 0,
           "width": 640,
           "height": 640,
-          "fov-degrees": 150.0,
+          "fov-degrees": 220.0,
           "capture-enabled": true,
           "streaming-enabled": false,
           "pixels-as-float": false,
           "compress": false,
-          "target-gamma": 2.5
+          "target-gamma": 2.5,
+          "projection": "fisheye",
+          "fisheye-model": "equidistant",
+          "fisheye-face-resolution": 768
         }
       ],
       "origin": {
@@ -378,12 +384,15 @@
           "image-type": 0,
           "width": 640,
           "height": 640,
-          "fov-degrees": 150.0,
+          "fov-degrees": 220.0,
           "capture-enabled": true,
           "streaming-enabled": false,
           "pixels-as-float": false,
           "compress": false,
-          "target-gamma": 2.5
+          "target-gamma": 2.5,
+          "projection": "fisheye",
+          "fisheye-model": "equidistant",
+          "fisheye-face-resolution": 768
         }
       ],
       "origin": {
@@ -402,12 +411,15 @@
           "image-type": 0,
           "width": 640,
           "height": 640,
-          "fov-degrees": 150.0,
+          "fov-degrees": 220.0,
           "capture-enabled": true,
           "streaming-enabled": false,
           "pixels-as-float": false,
           "compress": false,
-          "target-gamma": 2.5
+          "target-gamma": 2.5,
+          "projection": "fisheye",
+          "fisheye-model": "equidistant",
+          "fisheye-face-resolution": 768
         }
       ],
       "origin": {
