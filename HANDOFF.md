@@ -150,3 +150,170 @@ problem).
   (v1.0.0+); the packaged environments are from release `v0.3.0`. That is the
   newest release carrying Linux environment binaries. `scripts/fetch_env.sh`
   pins it via `AIRSIM_RELEASE`.
+
+---
+
+# Part 2 — Multi-camera fisheye rig (in progress)
+
+**Added:** 2026-09-07, after the base environment was verified.
+
+## 7. The target
+
+| Requirement | Value |
+| --- | --- |
+| Cameras | 4 fisheye, facing front / back / left / right |
+| FOV | 220 degrees |
+| Resolution | 1920x1080 each |
+| Frame rate | 30 Hz, synchronised across all four |
+| IMU | 200 Hz |
+| Output | Foxglove, via ROS2 + foxglove_bridge |
+
+## 8. Measurements that shaped the design
+
+These were taken on this host against the Blocks environment. They are the
+reason the design looks the way it does, so re-measure before overriding them.
+
+### 8.1 A perspective camera cannot exceed 180 degrees
+
+`fov-degrees` is fed straight into a perspective projection, so the focal length
+is `fx = width / (2 * tan(fov/2))`. Past 180 degrees the tangent goes negative.
+Read back from the simulator's own `camera_info` topic:
+
+| Requested | fx reported | Effective FOV |
+| --- | --- | --- |
+| 90 | 256.00 | 90 (correct) |
+| 150 | 68.60 | 150 (correct) |
+| 179 | 2.23 | 179 (correct, but useless resolution distribution) |
+| 200 | **-45.14** | -160 (projection inverted) |
+| 220 | **-93.18** | -140 (projection inverted) |
+| 270 | **-256.00** | -90 (projection inverted) |
+
+The sim renders *something* for all of them, which is the trap: no error is
+raised, the images just do not mean what the config says. `distortion_model`
+comes back empty with zero parameters, so there is no built-in fisheye model
+either.
+
+### 8.2 Per-camera cost dominates, not pixels
+
+| Configuration | Achieved | Pixel throughput | GPU 0 | Sim CPU |
+| --- | --- | --- | --- | --- |
+| 20 cams @ 400x400, 30 Hz target | 14.8 Hz | 50 Mpix/s | 58% | 230% (2.3 of 56 cores) |
+| 4 cams @ 1920x1080, 30 Hz target | 26.7 Hz | 221 Mpix/s | 60% | - |
+
+Fitting `cost = c + k * megapixels` to those two points gives **c = 2.64 ms
+fixed per camera-frame**, k = 3.24 ms/Mpix. Neither the GPU nor the CPU is
+saturated in either case — the limit is the simulator's per-camera serial
+capture path.
+
+The consequence: **roughly 9-10 camera streams at 30 Hz**, almost independent
+of resolution. Adding GPUs does not help; only GPU 0 is ever used.
+
+This is what rules out the obvious client-side approach of rendering a 5-face
+cube per eye (4 x 5 = 20 streams) and remapping in the client. It would land
+around 13-15 Hz.
+
+### 8.3 What already works
+
+* IMU at exactly **200.0 Hz** with the scene clock at `step-ns: 5000000`.
+  The IMU has no rate of its own — `core_sim/src/sensors/imu.cpp` updates on
+  the scene tick ("Using sim_dt_nanos supplied by the Scene as it is the
+  fastest ticking"), so **IMU rate is the scene clock rate**. Setting it also
+  caps physics at 200 Hz, which is fine for a quadrotor.
+* Four cameras are **frame-synchronous**: 570 of 570 frames shared an identical
+  `time_stamp` across all four eyes. No extra synchronisation work is needed.
+* 4 x 1920x1080 at 26.7 Hz, sim at 0.94x real time.
+
+## 9. Chosen approach
+
+**Render true fisheye inside the Unreal plugin.** One capture per eye instead
+of five, which keeps the transport cost identical to the 4-camera case already
+measured at 26.7 Hz.
+
+```
+USceneCaptureComponentCube  ->  UTextureRenderTargetCube
+                                      |
+                        fisheye mapping post-process material  (GPU)
+                                      |
+                                UTextureRenderTarget2D  (1920x1080)
+                                      |
+                     existing ReadPixels path in UnrealCamera.cpp
+```
+
+The alternative — 5 perspective faces per eye remapped client-side — was
+measured and rejected on frame rate (8.2). Modifying the plugin costs an engine
+build up front but is the only route to 220 degrees at 30 Hz.
+
+### Where the code goes
+
+`unreal/Blocks/Plugins/ProjectAirSim/Source/ProjectAirSim/Private/Sensors/UnrealCamera.cpp`
+
+Today each image type gets a `USceneCaptureComponent2D` with
+`CaptureSource = SCS_FinalColorLDR`, `bCaptureEveryFrame = false`, captured
+manually and read back through `OnRendered()` -> `UnrealCameraRenderRequest::ReadPixels()`.
+
+The work:
+
+1. Add a `USceneCaptureComponentCube` + `UTextureRenderTargetCube` for cameras
+   configured as fisheye.
+2. Add a post-process material sampling the cube through the fisheye model.
+   Equidistant is `r = f * theta`, so a pixel at radius `r` from the image
+   centre maps to `theta = (r / R) * (fov / 2)`; build the direction vector from
+   `theta` and the azimuth and sample the cubemap.
+3. Render the material into a `UTextureRenderTarget2D` and hand that to the
+   existing readback path, so nothing downstream changes.
+4. Extend the robot config schema: a `projection` field (`perspective` |
+   `fisheye`), a `fisheye-model` field (`equidistant` | `equisolid` |
+   `stereographic`), and lift the `fov-degrees` ceiling for fisheye cameras.
+5. Publish the fisheye intrinsics through `camera_info` using a model that can
+   express them — `distortion_model: "equidistant"` (Kannala-Brandt), which is
+   what ROS and most VIO front ends expect.
+
+### Engine prerequisite
+
+`Blocks.uproject` declares `EngineAssociation: "5.2"`, so the plugin needs
+**UE 5.2 source**, and an *installed build* of it to avoid recompiling the
+engine on every plugin iteration. Upstream's own estimate: ~200 GB and 4+
+hours. The host has 1.2 TB free.
+
+`git@github.com:EpicGames/UnrealEngine.git` is reachable from this machine, so
+the GitHub account is already linked to an Epic account — that usual blocker
+does not apply.
+
+## 10. Progress
+
+| Step | State |
+| --- | --- |
+| UE 5.2 source cloned (`engine/UnrealEngine-5.2`, shallow) | done |
+| `Setup.sh` dependency download | running |
+| Installed engine build | not started (~4 h) |
+| Fisheye capture in the plugin | not started |
+| Blocks repackaged with the modified plugin | not started |
+| ROS2 bridge + foxglove_bridge image | built, not yet verified end to end |
+
+`engine/` is git-ignored — it is a quarter-terabyte of build tree.
+
+## 11. ROS2 / Foxglove path
+
+`docker/ros2/` builds `ros:humble-ros-base` with `foxglove_bridge` and the
+upstream `ros/projectairsim_ros2_cpp` bridge. The bridge connects over the
+native Project AirSim client protocol, republishes sensors as typed ROS2
+messages, and `foxglove_bridge` serves them on `ws://0.0.0.0:8765`.
+
+```bash
+docker compose -f docker/docker-compose.yml up -d sim ros2
+# then point Foxglove at ws://<host>:8765
+```
+
+The colcon workspace builds on first container start into
+`ProjectAirSim/ros/{build,install,log}` (all git-ignored), so bridge edits on
+the host rebuild without touching the image.
+
+Two things to watch:
+
+* **`SCENE_CONFIG` empty means "attach to the loaded scene"** rather than
+  replacing it. Set it only when you want the bridge to own scene loading.
+* A raw 1920x1080 BGR frame is ~6 MB. Four at 30 Hz will overrun Fast DDS's
+  default shared-memory segment. The bridge ships `fastdds_shm_256m.xml`;
+  `USE_SHM_PROFILE=1` enables it, but that profile is **shared-memory only** —
+  DDS then cannot cross the container boundary, so subscribers must live in the
+  same container.

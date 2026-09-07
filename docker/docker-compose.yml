@@ -70,6 +70,50 @@ services:
     restart: "no"
 
   # ---------------------------------------------------------------------------
+  # ROS2 bridge + Foxglove WebSocket
+  # ---------------------------------------------------------------------------
+  ros2:
+    build:
+      context: ./ros2
+      args:
+        USER_UID: ${USER_UID:-1000}
+        USER_GID: ${USER_GID:-1000}
+    image: multicamdrone/airsim-ros2:latest
+    container_name: airsim-ros2
+
+    environment:
+      SIM_ADDRESS: sim
+      PROJECTAIRSIM_REPO: /workspace/ProjectAirSim
+      # Empty means "attach to the scene that is already loaded" rather than
+      # replacing it. Set it to load a scene on the bridge's behalf.
+      SCENE_CONFIG: ${SCENE_CONFIG:-}
+      SIM_CONFIG_PATH: ${SIM_CONFIG_PATH:-/workspace/workspace/sim_config}
+      VEHICLE_NAME: ${VEHICLE_NAME:-Drone1}
+      FOXGLOVE_PORT: 8765
+      ROS_DOMAIN_ID: ${ROS_DOMAIN_ID:-0}
+
+    volumes:
+      - ..:/workspace
+      - ../output:/output
+
+    ports:
+      - "${FOXGLOVE_BIND_ADDR:-0.0.0.0}:8765:8765"   # Foxglove WebSocket
+
+    # DDS discovery and the bridge's image queues both want more than docker's
+    # 64MB default.
+    shm_size: "2gb"
+    ulimits:
+      nofile: { soft: 65536, hard: 65536 }
+
+    depends_on:
+      - sim
+
+    stdin_open: true
+    tty: true
+    # Run both the Project AirSim bridge and foxglove_bridge in one container.
+    command: ["both"]
+
+  # ---------------------------------------------------------------------------
   # Python client
   # ---------------------------------------------------------------------------
   client:

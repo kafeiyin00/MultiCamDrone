@@ -2,6 +2,11 @@
 # MultiCamDrone - ignored paths
 # =============================================================================
 
+# --- Unreal Engine source tree ---------------------------------------------
+# A source + installed build of UE 5.2 is ~250GB. Re-fetch with
+# scripts/fetch_engine.sh (needs a GitHub account linked to Epic Games).
+/engine/
+
 # --- Large binary assets: pre-built Unreal environments and their archives ---
 # These are multi-GB downloads from the Project AirSim releases page and are
 # re-fetchable with scripts/fetch_env.sh, so they stay out of git.
@@ -19,6 +24,11 @@ DerivedDataCache/
 /data/
 *.mp4
 *.avi
+
+# --- ROS2 colcon workspace output (inside the submodule) --------------------
+/ProjectAirSim/ros/build/
+/ProjectAirSim/ros/install/
+/ProjectAirSim/ros/log/
 
 # --- Python ---
 __pycache__/
