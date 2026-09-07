@@ -1,0 +1,785 @@
+diff --git a/core_sim/include/core_sim/sensors/camera.hpp b/core_sim/include/core_sim/sensors/camera.hpp
+index f25bf2b..0886c8a 100644
+--- a/core_sim/include/core_sim/sensors/camera.hpp
++++ b/core_sim/include/core_sim/sensors/camera.hpp
+@@ -104,6 +104,28 @@ struct CaptureSettings {
+   float target_gamma =
+       2.5f;  // This would be reset to kSceneTargetGamma for scene as default
+   int projection_mode = 0;  // ECameraProjectionMode::Perspective
++
++  // --- Fisheye ---------------------------------------------------------
++  // Kept separate from projection_mode, which is cast straight to Unreal's
++  // ECameraProjectionMode (0 Perspective / 1 Orthographic); a third value
++  // there would be reinterpreted as a garbage Unreal enum.
++  //
++  // A perspective projection cannot exceed 180 degrees -- the focal length
++  // width/(2*tan(fov/2)) goes negative past it -- so a fisheye camera is
++  // rendered as several perspective faces and remapped on the GPU. When this
++  // is set, fov_degrees is the horizontal fisheye field of view and may be
++  // greater than 180.
++  bool fisheye_enabled = false;
++  // 0 equidistant (r = f*theta), 1 equisolid (r = 2f*sin(theta/2)),
++  // 2 stereographic (r = 2f*tan(theta/2)). Equidistant is the default because
++  // it is Kannala-Brandt with k1..k4 = 0, so the model rendered and the model
++  // published in camera_info coincide exactly.
++  int fisheye_model = 0;
++  // Edge length of each perspective face rendered before the remap. This is
++  // the quality/cost dial: an equidistant fisheye has uniform angular
++  // resolution, while a 90-degree perspective face is coarsest at its centre,
++  // so matching a 1920-wide 220-degree output everywhere would need ~1000 px.
++  int fisheye_face_resolution = 768;
+   float ortho_width = std::numeric_limits<float>::quiet_NaN();
+   float max_depth_meters = 1.0;  // for depthvis
+   float depth_of_field_focal_meters = std::numeric_limits<float>::quiet_NaN();
+diff --git a/core_sim/src/constant.hpp b/core_sim/src/constant.hpp
+index 2e15314..7e93be4 100644
+--- a/core_sim/src/constant.hpp
++++ b/core_sim/src/constant.hpp
+@@ -188,6 +188,10 @@ class Constant {
+     static constexpr const char* width = "width";
+     static constexpr const char* height = "height";
+     static constexpr const char* fov_degrees = "fov-degrees";
++    static constexpr const char* projection = "projection";
++    static constexpr const char* fisheye_model = "fisheye-model";
++    static constexpr const char* fisheye_face_resolution =
++        "fisheye-face-resolution";
+     static constexpr const char* pixels_as_float = "pixels-as-float";
+     static constexpr const char* compress = "compress";
+     static constexpr const char* auto_exposure_method = "auto-exposure-method";
+diff --git a/core_sim/src/sensors/camera.cpp b/core_sim/src/sensors/camera.cpp
+index 3b14439..c13b8ce 100644
+--- a/core_sim/src/sensors/camera.cpp
++++ b/core_sim/src/sensors/camera.cpp
+@@ -6,6 +6,7 @@
+ #include "core_sim/sensors/camera.hpp"
+ 
+ #include <atomic>
++#include <cmath>
+ #include <cstdint>
+ #include <map>
+ #include <memory>
+@@ -951,9 +952,44 @@ void Camera::Impl::OnBeginUpdate() {
+     // Only publish info on image types that are capture-enabled
+     if (!capture_setting.capture_enabled) continue;
+ 
+-    double focal_length =
+-        capture_setting.width / 2 /
+-        tan(TransformUtils::ToRadians(capture_setting.fov_degrees) / 2);
++    // Perspective: r = f*tan(theta), so f = (width/2)/tan(fov/2).
++    // Fisheye: the radial law is r = f*theta (equidistant), r = 2f*sin(theta/2)
++    // (equisolid) or r = 2f*tan(theta/2) (stereographic). In each case f is
++    // fixed by requiring the image circle radius width/2 at theta = fov/2.
++    const double half_fov_rad =
++        TransformUtils::ToRadians(capture_setting.fov_degrees) / 2;
++    const double image_circle_radius =
++        static_cast<double>(capture_setting.width) / 2;
++
++    double focal_length;
++    std::string distortion_model;
++    if (capture_setting.fisheye_enabled) {
++      switch (capture_setting.fisheye_model) {
++        case 1:  // equisolid
++          focal_length = image_circle_radius / (2 * std::sin(half_fov_rad / 2));
++          break;
++        case 2:  // stereographic
++          focal_length = image_circle_radius / (2 * std::tan(half_fov_rad / 2));
++          break;
++        default:  // equidistant
++          focal_length = image_circle_radius / half_fov_rad;
++          break;
++      }
++      // "equidistant" is the only fisheye model string ROS sanctions, and with
++      // all-zero coefficients it *is* Kannala-Brandt r = f*theta, so for the
++      // default model what is published matches what is rendered exactly.
++      //
++      // Consumers should note theta_max = (width/2)/focal_length, which is
++      // above 90 degrees here. Every common *implementation* of this model
++      // (OpenCV cv::fisheye, ROS image_geometry, OpenVINS, Foxglove) computes
++      // theta = atan(r) and so silently truncates at 90 degrees, discarding
++      // ~21% of a 220-degree image. VINS-Fusion/camodocal and Basalt use
++      // acos(z/|P|) and handle the full field.
++      distortion_model = "equidistant";
++    } else {
++      focal_length = image_circle_radius / std::tan(half_fov_rad);
++      distortion_model = "";
++    }
+ 
+     std::array<double, 5> distortion_parms = {{0, 0, 0, 0, 0}};
+     std::array<double, 9> intrinsic_camera_matrix = {
+@@ -964,9 +1000,10 @@ void Camera::Impl::OnBeginUpdate() {
+     std::array<double, 12> projection_matrix = {
+         {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0}};
+ 
+-    CameraInfoMessage message(capture_setting.width, capture_setting.height, "",
+-                              distortion_parms, intrinsic_camera_matrix,
+-                              rectification_matrix, projection_matrix);
++    CameraInfoMessage message(capture_setting.width, capture_setting.height,
++                              distortion_model, distortion_parms,
++                              intrinsic_camera_matrix, rectification_matrix,
++                              projection_matrix);
+ 
+     auto iimage_type = capture_setting.image_type;
+     Topic* ptopic;
+@@ -1359,6 +1396,55 @@ void Camera::Loader::LoadCaptureSetting(const json& json) {
+   setting.chromatic_aberration_intensity = JsonUtils::GetNumber(
+       json, Constant::Config::chromatic_aberration_intensity,
+       setting.chromatic_aberration_intensity);
++
++  // --- Fisheye ---------------------------------------------------------
++  const std::string projection =
++      JsonUtils::GetString(json, Constant::Config::projection, "perspective");
++  setting.fisheye_enabled = (projection == "fisheye");
++
++  if (setting.fisheye_enabled) {
++    const std::string model = JsonUtils::GetString(
++        json, Constant::Config::fisheye_model, "equidistant");
++    if (model == "equidistant") {
++      setting.fisheye_model = 0;
++    } else if (model == "equisolid") {
++      setting.fisheye_model = 1;
++    } else if (model == "stereographic") {
++      setting.fisheye_model = 2;
++    } else {
++      impl.logger_.LogError(impl.name_,
++                            "[%s] Unknown 'fisheye-model' \'%s\'. Expected "
++                            "equidistant, equisolid or stereographic.",
++                            impl.id_.c_str(), model.c_str());
++      throw Error("Unknown 'fisheye-model' in capture settings.");
++    }
++
++    setting.fisheye_face_resolution =
++        JsonUtils::GetInteger(json, Constant::Config::fisheye_face_resolution,
++                              setting.fisheye_face_resolution);
++
++    // Only these three radial laws stay monotonic out to 110 degrees, which is
++    // the half-angle a 220-degree fisheye needs. Orthographic folds back past
++    // 90 and rectilinear is singular there.
++    if (setting.fov_degrees <= 0.0f || setting.fov_degrees > 360.0f) {
++      impl.logger_.LogError(
++          impl.name_,
++          "[%s] Fisheye 'fov-degrees' is %f; expected (0, 360].",
++          impl.id_.c_str(), setting.fov_degrees);
++      throw Error("Fisheye 'fov-degrees' out of range.");
++    }
++  } else if (setting.fov_degrees >= 180.0f) {
++    // Fail loudly rather than rendering an inverted projection. The stock code
++    // path feeds this straight into width/(2*tan(fov/2)), which is negative
++    // past 180 degrees, and nothing downstream notices.
++    impl.logger_.LogError(
++        impl.name_,
++        "[%s] 'fov-degrees' is %f, but a perspective camera cannot exceed "
++        "180 (its focal length goes negative). Set \'projection\': "
++        "\'fisheye\' for a wider field of view.",
++        impl.id_.c_str(), setting.fov_degrees);
++    throw Error("Perspective 'fov-degrees' must be below 180.");
++  }
+   // TODO: add other settings
+ 
+   impl.camera_settings.capture_settings.at(id) = setting;
+diff --git a/unreal/Blocks/Plugins/ProjectAirSim/Source/ProjectAirSim/Private/Sensors/FisheyeRemapCS.cpp b/unreal/Blocks/Plugins/ProjectAirSim/Source/ProjectAirSim/Private/Sensors/FisheyeRemapCS.cpp
+new file mode 100644
+index 0000000..5c5456d
+--- /dev/null
++++ b/unreal/Blocks/Plugins/ProjectAirSim/Source/ProjectAirSim/Private/Sensors/FisheyeRemapCS.cpp
+@@ -0,0 +1,66 @@
++// Copyright (C) 2026 MultiCamDrone contributors
++//
++// MIT License. All rights reserved.
++
++#include "FisheyeRemapCS.h"
++
++#include "GlobalShader.h"
++#include "RenderGraphUtils.h"
++#include "ShaderParameterUtils.h"
++
++IMPLEMENT_GLOBAL_SHADER(FFisheyeRemapCS, "/CustomShaders/FisheyeRemapCS.usf",
++                        "MainComputeShader", SF_Compute);
++
++void DispatchFisheyeRemap(FRHICommandListImmediate& RHICmdList,
++                          const FFisheyeRemapArgs& Args) {
++  check(IsInRenderingThread());
++
++  if (!Args.OutputUAV.IsValid() || Args.OutputSize.X <= 0 ||
++      Args.OutputSize.Y <= 0 || Args.FocalPx <= 0.0f) {
++    return;
++  }
++
++  // A missing face would sample garbage, so refuse the whole frame rather than
++  // emit an image with a wedge of noise in it.
++  for (int32 i = 0; i < kFisheyeFaceCount; ++i) {
++    if (!Args.Faces[i].Texture.IsValid()) return;
++  }
++
++  TShaderMapRef<FFisheyeRemapCS> Shader(
++      GetGlobalShaderMap(GMaxRHIFeatureLevel));
++  if (!Shader.IsValid()) return;
++
++  FFisheyeRemapCS::FParameters Parameters;
++  Parameters.Face0 = Args.Faces[0].Texture;
++  Parameters.Face1 = Args.Faces[1].Texture;
++  Parameters.Face2 = Args.Faces[2].Texture;
++  Parameters.Face3 = Args.Faces[3].Texture;
++  Parameters.Face4 = Args.Faces[4].Texture;
++
++  // Bilinear so the seams between faces do not alias, clamped so a sample that
++  // lands a hair outside a face reuses its edge instead of wrapping to the
++  // opposite side of that face.
++  Parameters.FaceSampler =
++      TStaticSamplerState<SF_Bilinear, AM_Clamp, AM_Clamp, AM_Clamp>::GetRHI();
++
++  for (int32 i = 0; i < kFisheyeFaceCount; ++i) {
++    Parameters.FaceForward[i] = FVector4f(Args.Faces[i].Forward, 0.0f);
++    Parameters.FaceRight[i] = FVector4f(Args.Faces[i].Right, 0.0f);
++    Parameters.FaceDown[i] = FVector4f(Args.Faces[i].Down, 0.0f);
++  }
++
++  Parameters.OutputCentre =
++      FVector2f(Args.OutputSize.X * 0.5f, Args.OutputSize.Y * 0.5f);
++  Parameters.FocalPx = Args.FocalPx;
++  Parameters.ThetaMax = Args.ThetaMax;
++  Parameters.RadialModel = Args.RadialModel;
++  Parameters.OutputSize =
++      FUintVector2(static_cast<uint32>(Args.OutputSize.X),
++                   static_cast<uint32>(Args.OutputSize.Y));
++  Parameters.OutFisheye = Args.OutputUAV;
++
++  const FIntVector GroupCount = FComputeShaderUtils::GetGroupCount(
++      Args.OutputSize, FIntPoint(FISHEYE_THREADS_X, FISHEYE_THREADS_Y));
++
++  FComputeShaderUtils::Dispatch(RHICmdList, Shader, Parameters, GroupCount);
++}
+diff --git a/unreal/Blocks/Plugins/ProjectAirSim/Source/ProjectAirSim/Private/Sensors/FisheyeRemapCS.h b/unreal/Blocks/Plugins/ProjectAirSim/Source/ProjectAirSim/Private/Sensors/FisheyeRemapCS.h
+new file mode 100644
+index 0000000..203947a
+--- /dev/null
++++ b/unreal/Blocks/Plugins/ProjectAirSim/Source/ProjectAirSim/Private/Sensors/FisheyeRemapCS.h
+@@ -0,0 +1,91 @@
++// Copyright (C) 2026 MultiCamDrone contributors
++//
++// MIT License. All rights reserved.
++//
++// Compute shader that assembles one fisheye image from five 90-degree
++// perspective faces. See Shaders/FisheyeRemapCS.usf for the mapping itself and
++// docs/FISHEYE.md for why it is done this way rather than with
++// USceneCaptureComponentCube.
++#pragma once
++
++#include "CoreMinimal.h"
++#if ENGINE_MAJOR_VERSION == 5
++  #if ENGINE_MINOR_VERSION >= 2
++    #include "DataDrivenShaderPlatformInfo.h"
++  #endif
++#endif
++#include "GlobalShader.h"
++#include "RHI.h"
++#include "ShaderParameterStruct.h"
++
++#define FISHEYE_THREADS_X 8
++#define FISHEYE_THREADS_Y 8
++#define FISHEYE_THREADS_Z 1
++
++// Centre, right, left, up, down. The sixth cube face is never sampled for any
++// field of view below 270 degrees, so it is never rendered either.
++static constexpr int32 kFisheyeFaceCount = 5;
++
++class FFisheyeRemapCS : public FGlobalShader {
++ public:
++  DECLARE_GLOBAL_SHADER(FFisheyeRemapCS);
++  SHADER_USE_PARAMETER_STRUCT(FFisheyeRemapCS, FGlobalShader);
++
++  BEGIN_SHADER_PARAMETER_STRUCT(FParameters, )
++  SHADER_PARAMETER_TEXTURE(Texture2D<float4>, Face0)
++  SHADER_PARAMETER_TEXTURE(Texture2D<float4>, Face1)
++  SHADER_PARAMETER_TEXTURE(Texture2D<float4>, Face2)
++  SHADER_PARAMETER_TEXTURE(Texture2D<float4>, Face3)
++  SHADER_PARAMETER_TEXTURE(Texture2D<float4>, Face4)
++  SHADER_PARAMETER_SAMPLER(SamplerState, FaceSampler)
++  // Orthonormal basis per face, already converted out of Unreal's axis
++  // convention into the shader's camera frame (x right, y down, z forward).
++  // Shader parameter arrays are float4-aligned, hence FVector4f.
++  SHADER_PARAMETER_ARRAY(FVector4f, FaceForward, [kFisheyeFaceCount])
++  SHADER_PARAMETER_ARRAY(FVector4f, FaceRight, [kFisheyeFaceCount])
++  SHADER_PARAMETER_ARRAY(FVector4f, FaceDown, [kFisheyeFaceCount])
++  SHADER_PARAMETER(FVector2f, OutputCentre)
++  SHADER_PARAMETER(float, FocalPx)
++  SHADER_PARAMETER(float, ThetaMax)
++  SHADER_PARAMETER(uint32, RadialModel)
++  SHADER_PARAMETER(FUintVector2, OutputSize)
++  SHADER_PARAMETER_UAV(RWTexture2D<float4>, OutFisheye)
++  END_SHADER_PARAMETER_STRUCT()
++
++  static bool ShouldCompilePermutation(
++      const FGlobalShaderPermutationParameters& Parameters) {
++    return IsFeatureLevelSupported(Parameters.Platform, ERHIFeatureLevel::SM5);
++  }
++
++  static inline void ModifyCompilationEnvironment(
++      const FGlobalShaderPermutationParameters& Parameters,
++      FShaderCompilerEnvironment& OutEnvironment) {
++    FGlobalShader::ModifyCompilationEnvironment(Parameters, OutEnvironment);
++    OutEnvironment.SetDefine(TEXT("THREADGROUPSIZE_X"), FISHEYE_THREADS_X);
++    OutEnvironment.SetDefine(TEXT("THREADGROUPSIZE_Y"), FISHEYE_THREADS_Y);
++    OutEnvironment.SetDefine(TEXT("THREADGROUPSIZE_Z"), FISHEYE_THREADS_Z);
++  }
++};
++
++// One rendered face and where it points.
++struct FFisheyeFace {
++  FVector3f Forward = FVector3f::ZeroVector;
++  FVector3f Right = FVector3f::ZeroVector;
++  FVector3f Down = FVector3f::ZeroVector;
++  FTextureRHIRef Texture;
++};
++
++struct FFisheyeRemapArgs {
++  FFisheyeFace Faces[kFisheyeFaceCount];
++  FUnorderedAccessViewRHIRef OutputUAV;
++  FIntPoint OutputSize = FIntPoint::ZeroValue;
++  // Pixels per radian for the equidistant model; see camera.cpp for how the
++  // other two laws scale it. Must match what camera_info publishes.
++  float FocalPx = 0.0f;
++  float ThetaMax = 0.0f;  // radians, half the fisheye field of view
++  uint32 RadialModel = 0;  // 0 equidistant, 1 equisolid, 2 stereographic
++};
++
++// Enqueues the remap. Must be called on the render thread.
++void DispatchFisheyeRemap(FRHICommandListImmediate& RHICmdList,
++                          const FFisheyeRemapArgs& Args);
+diff --git a/unreal/Blocks/Plugins/ProjectAirSim/Source/ProjectAirSim/Private/Sensors/UnrealCamera.cpp b/unreal/Blocks/Plugins/ProjectAirSim/Source/ProjectAirSim/Private/Sensors/UnrealCamera.cpp
+index 3800a7c..57e102e 100644
+--- a/unreal/Blocks/Plugins/ProjectAirSim/Source/ProjectAirSim/Private/Sensors/UnrealCamera.cpp
++++ b/unreal/Blocks/Plugins/ProjectAirSim/Source/ProjectAirSim/Private/Sensors/UnrealCamera.cpp
+@@ -25,6 +25,7 @@
+ #include "RenderingThread.h"
+ #include "Runtime/Engine/Classes/Kismet/KismetMathLibrary.h"
+ #include "UObject/ConstructorHelpers.h"
++#include "FisheyeRemapCS.h"
+ #include "UnrealCameraRenderRequest.h"
+ #include "UnrealCompatibility.h"
+ #include "UnrealHelpers.h"
+@@ -334,9 +335,186 @@ void UUnrealCamera::SetupCameraFromSettings(
+ 
+     Capture->TextureTarget = RenderTargets[ImageType];
+   }
++
++  // Must come after the loop: it re-initialises the scene render target as the
++  // fisheye composite, which needs the target to already exist.
++  SetupFisheyeRig(CameraSetting.capture_settings.at(
++      projectairsim::MathUtils::ToNumeric(projectairsim::ImageType::kScene)));
++
+   UpdateCameraSettings();
+ }
+ 
++// The five faces, as relative rotations of the camera component. Unreal's
++// component axes are X forward, Y right, Z up, so a +90 yaw points the face
++// along +Y and a +90 pitch points it along +Z. Five faces at 90 degrees cover
++// +/-135 degrees along each axis, which contains the +/-110 that a 220-degree
++// fisheye needs; the sixth (rear) face is never sampled, so it is never made.
++static const FRotator kFisheyeFaceRotations[kFisheyeFaceCount] = {
++    FRotator(0.0f, 0.0f, 0.0f),     // 0 centre
++    FRotator(0.0f, 90.0f, 0.0f),    // 1 right
++    FRotator(0.0f, -90.0f, 0.0f),   // 2 left
++    FRotator(90.0f, 0.0f, 0.0f),    // 3 up
++    FRotator(-90.0f, 0.0f, 0.0f),   // 4 down
++};
++
++// Unreal component frame (X forward, Y right, Z up) into the shader's camera
++// frame (x right, y down, z forward).
++static FVector3f UnrealAxisToCameraFrame(const FVector& V) {
++  return FVector3f(static_cast<float>(V.Y), static_cast<float>(-V.Z),
++                   static_cast<float>(V.X));
++}
++
++void UUnrealCamera::SetupFisheyeRig(
++    const projectairsim::CaptureSettings& CaptureSetting) {
++  if (!CaptureSetting.fisheye_enabled || bFisheyeRigBuilt) return;
++
++  const int32 FaceRes = FMath::Max(64, CaptureSetting.fisheye_face_resolution);
++  const int32 OutW = FMath::Max(1, CaptureSetting.width);
++  const int32 OutH = FMath::Max(1, CaptureSetting.height);
++
++  // The radial law and its focal length must match core_sim's camera_info
++  // exactly, or the published intrinsics will not describe the rendered image.
++  // f is fixed by putting the image circle radius at width/2 when theta is
++  // half the field of view.
++  const float ThetaMax = FMath::DegreesToRadians(CaptureSetting.fov_degrees) / 2.0f;
++  const float Radius = OutW / 2.0f;
++  float Focal;
++  switch (CaptureSetting.fisheye_model) {
++    case 1:  // equisolid, r = 2f*sin(theta/2)
++      Focal = Radius / (2.0f * FMath::Sin(ThetaMax / 2.0f));
++      break;
++    case 2:  // stereographic, r = 2f*tan(theta/2)
++      Focal = Radius / (2.0f * FMath::Tan(ThetaMax / 2.0f));
++      break;
++    default:  // equidistant, r = f*theta
++      Focal = Radius / ThetaMax;
++      break;
++  }
++
++  FisheyeThetaMax = ThetaMax;
++  FisheyeFocalPx = Focal;
++  FisheyeRadialModel = static_cast<uint32>(CaptureSetting.fisheye_model);
++
++  // Reuse the scene render target as the composite, so the readback in
++  // OnRendered() finds it through Capture->TextureTarget with no change. It
++  // needs a UAV for the compute shader to write into, and bCanCreateUAV only
++  // takes effect on (re-)initialisation.
++  const int32 SceneIdx =
++      projectairsim::MathUtils::ToNumeric(projectairsim::ImageType::kScene);
++  FisheyeComposite = RenderTargets[SceneIdx];
++  if (FisheyeComposite == nullptr) return;
++  FisheyeComposite->bCanCreateUAV = true;
++  FisheyeComposite->ClearColor = FLinearColor::Black;
++  FisheyeComposite->InitCustomFormat(OutW, OutH, EPixelFormat::PF_B8G8R8A8,
++                                     true);
++  if (!std::isnan(CaptureSetting.target_gamma))
++    FisheyeComposite->TargetGamma = CaptureSetting.target_gamma;
++  FisheyeComposite->UpdateResourceImmediate(true);
++
++  FisheyeFaceCaptures.Empty(kFisheyeFaceCount);
++  FisheyeFaceTargets.Empty(kFisheyeFaceCount);
++
++  for (int32 i = 0; i < kFisheyeFaceCount; ++i) {
++    UTextureRenderTarget2D* FaceTarget = NewObject<UTextureRenderTarget2D>(this);
++    FaceTarget->ClearColor = FLinearColor::Black;
++    FaceTarget->InitCustomFormat(FaceRes, FaceRes, EPixelFormat::PF_B8G8R8A8,
++                                 true);
++    if (!std::isnan(CaptureSetting.target_gamma))
++      FaceTarget->TargetGamma = CaptureSetting.target_gamma;
++    FaceTarget->UpdateResourceImmediate(true);
++
++    USceneCaptureComponent2D* FaceCapture = NewObject<USceneCaptureComponent2D>(
++        this, *FString::Printf(TEXT("FisheyeFace%d"), i));
++    FaceCapture->SetupAttachment(this);
++    FaceCapture->CaptureSource = ESceneCaptureSource::SCS_FinalColorLDR;
++    FaceCapture->bAutoActivate = false;
++    FaceCapture->bCaptureEveryFrame = false;
++    FaceCapture->bCaptureOnMovement = false;
++    // Required for post-process blendables to apply to a manual capture with
++    // bCaptureEveryFrame off -- same reason the stock captures set it.
++    FaceCapture->bAlwaysPersistRenderingState = true;
++    FaceCapture->ProjectionType = ECameraProjectionMode::Perspective;
++    // Exactly 90 degrees: the remap's gnomonic step assumes tan(45) = 1.
++    FaceCapture->FOVAngle = 90.0f;
++    FaceCapture->TextureTarget = FaceTarget;
++    FaceCapture->RegisterComponent();
++    FaceCapture->SetRelativeRotation(kFisheyeFaceRotations[i]);
++    if (!CaptureSetting.show_debug_plots)
++      HideDebugDrawComponent(FaceCapture, GetWorld());
++    UpdateCameraPostProcessingSetting(FaceCapture->PostProcessSettings,
++                                      CaptureSetting);
++    FaceCapture->Activate();
++
++    FisheyeFaceCaptures.Add(FaceCapture);
++    FisheyeFaceTargets.Add(FaceTarget);
++  }
++
++  bFisheyeEnabled = true;
++  bFisheyeRigBuilt = true;
++
++  UnrealLogger::Log(
++      projectairsim::LogLevel::kInfo,
++      TEXT("[UnrealCamera] Fisheye rig: %d faces at %dx%d -> %dx%d, "
++           "fov %.1f deg, model %d, f %.2f px/rad"),
++      kFisheyeFaceCount, FaceRes, FaceRes, OutW, OutH,
++      CaptureSetting.fov_degrees, CaptureSetting.fisheye_model, Focal);
++}
++
++void UUnrealCamera::CaptureFisheyeFaces() {
++  for (USceneCaptureComponent2D* FaceCapture : FisheyeFaceCaptures) {
++    if (FaceCapture != nullptr) FaceCapture->CaptureSceneDeferred();
++  }
++}
++
++void UUnrealCamera::RemapFisheye(FRHICommandListImmediate& RHICmdList) {
++  if (!bFisheyeRigBuilt || FisheyeComposite == nullptr) return;
++
++  FTextureRenderTargetResource* OutResource =
++      FisheyeComposite->GetRenderTargetResource();
++  if (OutResource == nullptr) return;
++
++  FFisheyeRemapArgs Args;
++  Args.OutputUAV = OutResource->GetUnorderedAccessViewRHI();
++  Args.OutputSize = FIntPoint(FisheyeComposite->SizeX, FisheyeComposite->SizeY);
++  Args.FocalPx = FisheyeFocalPx;
++  Args.ThetaMax = FisheyeThetaMax;
++  Args.RadialModel = FisheyeRadialModel;
++
++  if (!Args.OutputUAV.IsValid()) {
++    // bCanCreateUAV did not take, so the composite cannot be written. Say so
++    // once rather than silently publishing whatever the target last held.
++    static bool bWarned = false;
++    if (!bWarned) {
++      bWarned = true;
++      UnrealLogger::Log(projectairsim::LogLevel::kError,
++                        TEXT("[UnrealCamera] Fisheye composite has no UAV; "
++                             "the remap cannot run."));
++    }
++    return;
++  }
++
++  for (int32 i = 0; i < kFisheyeFaceCount && i < FisheyeFaceTargets.Num(); ++i) {
++    UTextureRenderTarget2D* FaceTarget = FisheyeFaceTargets[i];
++    if (FaceTarget == nullptr) return;
++    FTextureRenderTargetResource* FaceResource =
++        FaceTarget->GetRenderTargetResource();
++    if (FaceResource == nullptr) return;
++    Args.Faces[i].Texture = FaceResource->GetRenderTargetTexture();
++
++    // Derive each face's basis from the rotation actually applied to its
++    // component, so the shader never has to know Unreal's axis convention.
++    const FQuat FaceQuat = kFisheyeFaceRotations[i].Quaternion();
++    Args.Faces[i].Forward =
++        UnrealAxisToCameraFrame(FaceQuat.RotateVector(FVector::ForwardVector));
++    Args.Faces[i].Right =
++        UnrealAxisToCameraFrame(FaceQuat.RotateVector(FVector::RightVector));
++    Args.Faces[i].Down =
++        UnrealAxisToCameraFrame(-FaceQuat.RotateVector(FVector::UpVector));
++  }
++
++  DispatchFisheyeRemap(RHICmdList, Args);
++}
++
+ void UUnrealCamera::SetRelativePoseFromNed(
+     const projectairsim::Transform& PoseNed) {
+   // Apply camera origin offset from the parent (either the parent link or
+@@ -761,7 +939,18 @@ void UUnrealCamera::TickComponent(
+       }
+ 
+       if (bEnable) {
+-        Capture->CaptureSceneDeferred();
++        const bool bIsFisheyeScene =
++            bFisheyeEnabled &&
++            ImageTypeInt == projectairsim::MathUtils::ToNumeric(
++                                projectairsim::ImageType::kScene);
++        if (bIsFisheyeScene) {
++          // The faces are the renderers here. The scene capture component is
++          // left un-captured on purpose -- its TextureTarget is the composite,
++          // which the remap writes and OnRendered() reads.
++          CaptureFisheyeFaces();
++        } else {
++          Capture->CaptureSceneDeferred();
++        }
+         bCaptureIsActive = true;
+       }
+     }
+@@ -795,6 +984,9 @@ void UUnrealCamera::TickComponent(
+       ENQUEUE_RENDER_COMMAND(SceneDrawCompletion)
+       ([this, CapturedCameraTransform, Annotations = std::move(Annotations)](
+            FRHICommandListImmediate& RHICmdList) {
++        // Composite the fisheye faces before anything reads the scene target;
++        // both happen on the render thread, in this order.
++        if (this->bFisheyeEnabled) this->RemapFisheye(RHICmdList);
+         this->OnRendered(CapturedCameraTransform, Annotations);
+       });
+     }
+@@ -1072,7 +1264,10 @@ void UUnrealCamera::CalculateProjectionMatrix() {
+   ViewInfo.Location = CaptureComp->GetComponentTransform().GetLocation();
+   ViewInfo.Rotation =
+       CaptureComp->GetComponentTransform().GetRotation().Rotator();
+-  ViewInfo.FOV = CaptureComp->FOVAngle;
++  // Same reason as in ComputeFrustumVertices: a fisheye field of view has no
++  // valid perspective projection matrix, so clamp rather than hand Unreal a
++  // value whose tangent is negative.
++  ViewInfo.FOV = FMath::Min(CaptureComp->FOVAngle, 170.0f);
+   ViewInfo.ProjectionMode = CaptureComp->ProjectionType;
+   ViewInfo.AspectRatio =
+       float(RenderTexture->SizeX) / float(RenderTexture->SizeY);
+@@ -1094,7 +1289,13 @@ void UUnrealCamera::ComputeFrustumVertices() {
+     FrustumInfo Info;
+     USceneCaptureComponent2D* CaptureComp = Captures[ImageType];
+ 
+-    float Angle = FMath::DegreesToRadians(CaptureComp->FOVAngle / 2);
++    // A fisheye camera has no perspective frustum: past 90 degrees of
++    // half-angle FMath::Tan goes negative and the frustum turns inside out.
++    // Clamp so the debug draw and bounding-box helpers stay finite. The
++    // resulting frustum is indicative only -- bounding-box projection through
++    // a perspective matrix is not meaningful for a fisheye image.
++    const float HalfFovDeg = FMath::Min(CaptureComp->FOVAngle / 2, 85.0f);
++    float Angle = FMath::DegreesToRadians(HalfFovDeg);
+     float AspectRatio = float(CaptureComp->TextureTarget->SizeX) /
+                         float(CaptureComp->TextureTarget->SizeY);
+ 
+diff --git a/unreal/Blocks/Plugins/ProjectAirSim/Source/ProjectAirSim/Private/Sensors/UnrealCamera.h b/unreal/Blocks/Plugins/ProjectAirSim/Source/ProjectAirSim/Private/Sensors/UnrealCamera.h
+index 2c67eb0..44039f4 100644
+--- a/unreal/Blocks/Plugins/ProjectAirSim/Source/ProjectAirSim/Private/Sensors/UnrealCamera.h
++++ b/unreal/Blocks/Plugins/ProjectAirSim/Source/ProjectAirSim/Private/Sensors/UnrealCamera.h
+@@ -194,6 +194,31 @@ class UUnrealCamera : public UUnrealSensor {
+   UPROPERTY() UMaterial* DisparityNormalizedMaterialStatic;
+   UPROPERTY() UMaterial* SurfaceNormalsMaterialStatic;
+ 
++  // --- Fisheye -----------------------------------------------------------
++  // A perspective projection cannot exceed 180 degrees, so a fisheye scene
++  // camera renders five 90-degree faces and a compute shader remaps them into
++  // one image. Only the kScene image type is composited; depth and
++  // segmentation stay on the ordinary single-capture path.
++  //
++  // The composite is what gets read back, so nothing downstream of
++  // OnRendered() -- transport, camera_info, the ROS2 bridge -- changes.
++  bool bFisheyeEnabled = false;
++  bool bFisheyeRigBuilt = false;
++  UPROPERTY() TArray<USceneCaptureComponent2D*> FisheyeFaceCaptures;
++  UPROPERTY() TArray<UTextureRenderTarget2D*> FisheyeFaceTargets;
++  UPROPERTY() UTextureRenderTarget2D* FisheyeComposite = nullptr;
++  float FisheyeFocalPx = 0.0f;
++  float FisheyeThetaMax = 0.0f;
++  uint32 FisheyeRadialModel = 0;
++
++  // Builds the five face captures and the composite target. Idempotent.
++  void SetupFisheyeRig(
++      const microsoft::projectairsim::CaptureSettings& CaptureSetting);
++  // Queues all five faces for rendering this frame.
++  void CaptureFisheyeFaces();
++  // Runs the remap into the composite target. Render thread only.
++  void RemapFisheye(FRHICommandListImmediate& RHICmdList);
++
+   // capture components
+   UCineCameraComponent* CameraComponent;
+   UPROPERTY() TArray<USceneCaptureComponent2D*> Captures;
+diff --git a/unreal/Blocks/Plugins/ProjectAirSim/Source/ProjectAirSim/Private/Shaders/FisheyeRemapCS.usf b/unreal/Blocks/Plugins/ProjectAirSim/Source/ProjectAirSim/Private/Shaders/FisheyeRemapCS.usf
+new file mode 100644
+index 0000000..6d1f880
+--- /dev/null
++++ b/unreal/Blocks/Plugins/ProjectAirSim/Source/ProjectAirSim/Private/Shaders/FisheyeRemapCS.usf
+@@ -0,0 +1,140 @@
++// Copyright (C) 2026 MultiCamDrone contributors
++//
++// MIT License. All rights reserved.
++//
++// Remaps five 90-degree perspective faces into one fisheye image.
++//
++// A perspective projection cannot exceed 180 degrees, so a wide fisheye has to
++// be assembled from several narrower renders. Five faces (centre, up, down,
++// left, right) cover +/-135 degrees along each axis, which comfortably contains
++// the +/-110 a 220-degree fisheye needs; the sixth cube face is never sampled
++// and so is never rendered.
++//
++// Each face basis arrives from C++ already expressed in this shader's camera
++// frame (x right, y down, z forward), so no Unreal axis conventions appear here.
++
++#pragma once
++
++#include "/Engine/Public/Platform.ush"
++
++Texture2D<float4> Face0;   // centre
++Texture2D<float4> Face1;   // right
++Texture2D<float4> Face2;   // left
++Texture2D<float4> Face3;   // up
++Texture2D<float4> Face4;   // down
++SamplerState FaceSampler;
++
++// Orthonormal basis per face, in camera frame. w components are padding: shader
++// parameter arrays are float4-aligned.
++float4 FaceForward[5];
++float4 FaceRight[5];
++float4 FaceDown[5];
++
++float2 OutputCentre;    // principal point, pixels
++float  FocalPx;         // f in the radial law, pixels per radian (equidistant)
++float  ThetaMax;        // half the fisheye field of view, radians
++uint   RadialModel;     // 0 equidistant, 1 equisolid, 2 stereographic
++uint2  OutputSize;
++
++RWTexture2D<float4> OutFisheye;
++
++// Invert the radial law: image radius -> angle from the optical axis.
++// Returns false when the pixel lies outside the image circle.
++bool RadiusToTheta(float r, out float Theta)
++{
++    Theta = 0.0f;
++
++    if (RadialModel == 1)
++    {
++        // Equisolid: r = 2f*sin(theta/2)
++        float s = r / (2.0f * FocalPx);
++        if (s > 1.0f) return false;
++        Theta = 2.0f * asin(s);
++    }
++    else if (RadialModel == 2)
++    {
++        // Stereographic: r = 2f*tan(theta/2)
++        Theta = 2.0f * atan(r / (2.0f * FocalPx));
++    }
++    else
++    {
++        // Equidistant: r = f*theta. This is Kannala-Brandt with k1..k4 = 0,
++        // which is exactly what camera_info publishes.
++        Theta = r / FocalPx;
++    }
++
++    return Theta <= ThetaMax;
++}
++
++float4 SampleFace(uint Index, float2 UV)
++{
++    // Texture2D cannot be indexed by a runtime value in this shader model, so
++    // the five faces are switched rather than arrayed.
++    switch (Index)
++    {
++        case 0:  return Face0.SampleLevel(FaceSampler, UV, 0);
++        case 1:  return Face1.SampleLevel(FaceSampler, UV, 0);
++        case 2:  return Face2.SampleLevel(FaceSampler, UV, 0);
++        case 3:  return Face3.SampleLevel(FaceSampler, UV, 0);
++        default: return Face4.SampleLevel(FaceSampler, UV, 0);
++    }
++}
++
++[numthreads(THREADGROUPSIZE_X, THREADGROUPSIZE_Y, THREADGROUPSIZE_Z)]
++void MainComputeShader(uint3 ThreadId : SV_DispatchThreadID)
++{
++    if (ThreadId.x >= OutputSize.x || ThreadId.y >= OutputSize.y) return;
++
++    const uint2 Pixel = ThreadId.xy;
++
++    // Pixel centres, so the image circle is symmetric about the principal point.
++    const float2 Offset = float2(Pixel) + 0.5f - OutputCentre;
++    const float  Radius = length(Offset);
++
++    float Theta;
++    if (!RadiusToTheta(Radius, Theta))
++    {
++        // Outside the image circle. Black corners are what a real fisheye on a
++        // rectangular sensor produces, so this is signal, not an error.
++        OutFisheye[Pixel] = float4(0.0f, 0.0f, 0.0f, 1.0f);
++        return;
++    }
++
++    // Direction of this pixel's ray in the camera frame.
++    const float Phi = atan2(Offset.y, Offset.x);
++    const float SinTheta = sin(Theta);
++    const float3 Dir = float3(SinTheta * cos(Phi), SinTheta * sin(Phi), cos(Theta));
++
++    // The face whose axis the ray is closest to is the one that contains it.
++    uint  Best = 0;
++    float BestDot = -2.0f;
++    UNROLL
++    for (uint i = 0; i < 5; ++i)
++    {
++        const float d = dot(Dir, FaceForward[i].xyz);
++        if (d > BestDot)
++        {
++            BestDot = d;
++            Best = i;
++        }
++    }
++
++    if (BestDot <= 1e-6f)
++    {
++        // Ray points away from every face. Unreachable for a field of view
++        // under 270 degrees, but guard rather than divide by ~zero.
++        OutFisheye[Pixel] = float4(0.0f, 0.0f, 0.0f, 1.0f);
++        return;
++    }
++
++    // Gnomonic projection onto the chosen face. The faces are exactly 90
++    // degrees, where tan(45) = 1, so the half-extent is the forward distance
++    // and the mapping reduces to this.
++    const float2 FaceXY = float2(dot(Dir, FaceRight[Best].xyz),
++                                 dot(Dir, FaceDown[Best].xyz)) / BestDot;
++    const float2 UV = saturate(0.5f + 0.5f * FaceXY);
++
++    float4 Colour = SampleFace(Best, UV);
++    Colour.a = 1.0f;
++    OutFisheye[Pixel] = Colour;
++}

@@ -328,8 +328,8 @@
       "capture-settings": [
         {
           "image-type": 0,
-          "width": 1920,
-          "height": 1080,
+          "width": 640,
+          "height": 640,
           "fov-degrees": 150.0,
           "capture-enabled": true,
           "streaming-enabled": false,
@@ -339,7 +339,7 @@
         }
       ],
       "origin": {
-        "xyz": "0.45 0.0 0.1",
+        "xyz": "0.3 0.0 0.06",
         "rpy-deg": "0 0 0"
       }
     },
@@ -352,8 +352,8 @@
       "capture-settings": [
         {
           "image-type": 0,
-          "width": 1920,
-          "height": 1080,
+          "width": 640,
+          "height": 640,
           "fov-degrees": 150.0,
           "capture-enabled": true,
           "streaming-enabled": false,
@@ -363,7 +363,7 @@
         }
       ],
       "origin": {
-        "xyz": "0.0 0.45 0.1",
+        "xyz": "0.0 0.3 0.06",
         "rpy-deg": "0 0 90"
       }
     },
@@ -376,8 +376,8 @@
       "capture-settings": [
         {
           "image-type": 0,
-          "width": 1920,
-          "height": 1080,
+          "width": 640,
+          "height": 640,
           "fov-degrees": 150.0,
           "capture-enabled": true,
           "streaming-enabled": false,
@@ -387,7 +387,7 @@
         }
       ],
       "origin": {
-        "xyz": "-0.45 0.0 0.1",
+        "xyz": "-0.3 0.0 0.06",
         "rpy-deg": "0 0 180"
       }
     },
@@ -400,8 +400,8 @@
       "capture-settings": [
         {
           "image-type": 0,
-          "width": 1920,
-          "height": 1080,
+          "width": 640,
+          "height": 640,
           "fov-degrees": 150.0,
           "capture-enabled": true,
           "streaming-enabled": false,
@@ -411,7 +411,7 @@
         }
       ],
       "origin": {
-        "xyz": "0.0 -0.45 0.1",
+        "xyz": "0.0 -0.3 0.06",
         "rpy-deg": "0 0 -90"
       }
     }

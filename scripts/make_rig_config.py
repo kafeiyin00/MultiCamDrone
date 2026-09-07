@@ -78,10 +78,17 @@ def camera(name: str, eye: dict, args) -> dict:
         "target-gamma": 2.5,
     }
     if args.projection == "fisheye":
-        # Consumed by the modified plugin; harmless to a stock build, which
-        # ignores unknown keys and clamps fov-degrees to the perspective limit.
+        # Requires the patched plugin. A stock Project AirSim ignores these
+        # keys (the JSONC schema has no additionalProperties:false and the C++
+        # server never validates), so it would silently render a broken
+        # perspective projection at this FOV instead -- which is exactly what
+        # the patched core_sim now refuses to do.
         settings["projection"] = "fisheye"
         settings["fisheye-model"] = args.fisheye_model
+        # Edge length of each of the five 90-degree faces rendered before the
+        # remap. Faces are never read back, so this costs GPU time but does not
+        # affect the frame size that matters for the readback leak.
+        settings["fisheye-face-resolution"] = args.fisheye_face_resolution
 
     x, y, z = eye["xyz"]
     return {
@@ -102,10 +109,18 @@ def main() -> int:
                     default="perspective")
     ap.add_argument("--fisheye-model",
                     choices=["equidistant", "equisolid", "stereographic"],
-                    default="equidistant")
+                    default="equidistant",
+                    help="equidistant is Kannala-Brandt with k1..k4 = 0, so "
+                         "what is rendered and what camera_info publishes "
+                         "coincide exactly (default)")
+    ap.add_argument("--fisheye-face-resolution", type=int, default=768,
+                    help="edge length of each of the five perspective faces "
+                         "composited into the fisheye (default 768). This is "
+                         "the quality/cost dial")
     ap.add_argument("--fov", type=float, default=150.0,
-                    help="degrees; a perspective camera cannot exceed 180 "
-                         "(see HANDOFF.md 8.1). Default 150.")
+                    help="degrees. A perspective camera cannot exceed 180; use "
+                         "--projection fisheye above that (see docs/FISHEYE.md). "
+                         "Default 150.")
     ap.add_argument("--width", type=int, default=1920)
     ap.add_argument("--height", type=int, default=1080)
     ap.add_argument("--rate", type=float, default=30.0, help="camera Hz")
@@ -165,7 +180,8 @@ def main() -> int:
         print(f"              threshold, so each frame leaks a VMA. Needs")
         print(f"              vm.max_map_count raised well above 65530.")
     if args.projection == "fisheye":
-        print(f"  model     : {args.fisheye_model}")
+        print(f"  model     : {args.fisheye_model}, "
+              f"{args.fisheye_face_resolution}px faces x5 per eye")
     print(f"  IMU       : {args.imu_rate:g}Hz (scene clock step {step_ns} ns)")
     print(f"  robot     : {robot_path}")
     print(f"  scene     : {scene_path}")

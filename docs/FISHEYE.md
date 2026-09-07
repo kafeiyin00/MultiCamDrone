@@ -246,12 +246,52 @@ cd ProjectAirSim
 ./build.sh package_blocks_shipping
 ```
 
+* **Put `/usr/bin` first in `PATH`.** This host also has a pip-installed cmake
+  4.4 in `~/.local/bin`, and CMake 4 removed support for
+  `cmake_minimum_required(VERSION < 3.5)`, which JSBSim still declares. With the
+  pip cmake ahead, the build dies at the JSBSim configure step with
+  "Compatibility with CMake < 3.5 has been removed"; the visible tail of the log
+  is an unrelated OpenSSL banner, so the real error is easy to miss. System
+  cmake 3.22.1 works.
 * clang 15.0.1 comes from the in-tree SDK (`v21_clang-15.0.1-centos7`); UBT finds
   it through `GetInTreeSDKRoot()` when `LINUX_MULTIARCH_ROOT` is unset.
 * dotnet comes from the engine bundle; the host needs neither clang nor dotnet
   installed.
-* `nice -n 15 taskset -c 0-47` keeps the build off the cores the running
+* `nice -n 15 taskset -c 0-43` keeps the build off the cores the running
   simulator needs.
+* Use **`package_blocks_shipping`**, not `package_plugin`, to get something
+  runnable: `package_plugin` depends on `blocks_debuggame blocks_development
+  blocks_shipping` and on Debug simlibs, so it rebuilds every third-party
+  dependency in Debug as well. `package_blocks_shipping` depends only on
+  `simlibs_release`.
+
+### 7.1 Only Blocks can be rebuilt
+
+`unreal/Blocks/Blocks.uproject` is the only Unreal *project* in the repo. The
+other environments — CityEnviron, Neighborhood, LandscapeMountains — ship as
+packaged binaries on the releases page with no project files, so **they cannot
+be repackaged with a modified plugin**. Fisheye therefore only works in Blocks
+until an environment's project is available.
+
+That is a real constraint on "fisheye in a complex scene": pick one of a wide
+field of view or a dense map, or obtain the map's Unreal project.
+
+---
+
+## 7.5 Carrying the changes
+
+The changes are to upstream code in the `ProjectAirSim` submodule, which is
+pinned to a specific commit, so they cannot be committed here. They live in
+`patches/` instead:
+
+```bash
+./scripts/apply_patches.sh --check    # what is applied
+./scripts/apply_patches.sh            # apply
+./scripts/apply_patches.sh --revert   # back to upstream
+```
+
+`--revert` also removes the added files, which a plain `git checkout` would
+leave behind.
 
 `scripts/build_engine.sh` fetches and builds the engine itself (~257 GB source,
 51 GB installed build, 4+ hours).
@@ -269,10 +309,46 @@ cd ProjectAirSim
 | Change sites identified | done — §6 |
 | UE 5.2 engine built | done — installed build 51 GB |
 | Plugin build path verified | done — §7, CMake configures |
-| Baseline plugin/simlibs build | in progress |
-| Fisheye implementation | not started |
-| Repackaged environment with fisheye | not started |
+| Baseline plugin/simlibs build | done |
+| Fisheye implementation | **written; core_sim compiles, plugin build in progress** |
+| Repackaged environment with fisheye | in progress (`package_blocks_shipping`) |
+| Fisheye verified against rendered images | **not yet** |
 
-Until the plugin ships, `scripts/make_rig_config.py` refuses a perspective FOV at
-or above 180° rather than emitting a config that silently renders nonsense. The
-current rig runs at 150°.
+### 8.1 What was implemented
+
+Eight files, carried as `patches/0001-fisheye-220-degree-cameras.patch`:
+
+| File | Change |
+| --- | --- |
+| `core_sim/src/constant.hpp` | JSON keys `projection`, `fisheye-model`, `fisheye-face-resolution` |
+| `core_sim/include/core_sim/sensors/camera.hpp` | `fisheye_enabled`, `fisheye_model`, `fisheye_face_resolution` on `CaptureSettings`. Kept **separate** from the existing `projection_mode`, which is cast straight to Unreal's `ECameraProjectionMode` and would reinterpret a third value as a garbage enum. |
+| `core_sim/src/sensors/camera.cpp` | Parses those keys; computes the fisheye focal length per radial law and publishes `distortion_model = "equidistant"`. Also **throws** on a perspective FOV at or above 180° instead of rendering an inverted projection. |
+| `.../Private/Shaders/FisheyeRemapCS.usf` | The remap: invert the radial law, build the ray, pick the face by largest dot product with its axis, gnomonic-project into it, sample. |
+| `.../Private/Sensors/FisheyeRemapCS.{h,cpp}` | `FGlobalShader` declaration and dispatch, modelled on the plugin's existing `LidarPointCloudCS`. |
+| `.../Private/Sensors/UnrealCamera.{h,cpp}` | Builds the five face captures, reuses the scene render target as the UAV-capable composite, captures the faces instead of the scene component, and runs the remap on the render thread before the readback. |
+
+Two details worth knowing:
+
+* **The composite *is* `RenderTargets[kScene]`.** `TextureTarget` is assigned in
+  exactly one place (`UnrealCamera.cpp:335`), so re-initialising that target
+  with `bCanCreateUAV` makes it both the compute shader's output and what
+  `OnRendered()` reads. Nothing downstream of the readback changed.
+* **Face bases are computed in C++**, from the rotation actually applied to each
+  face component, and handed to the shader in its own camera frame (x right,
+  y down, z forward). The shader contains no Unreal axis conventions.
+
+Perspective-only helpers are clamped rather than corrected:
+`ComputeFrustumVertices` and `CalculateProjectionMatrix` would otherwise take
+`tan` of a half-angle above 90° and invert the frustum. Bounding-box projection
+through a perspective matrix is not meaningful for a fisheye image and is not
+attempted.
+
+### 8.2 Still to verify
+
+Nothing below has been checked against a rendered image yet:
+
+* that the composite is written at all (the `bCanCreateUAV` re-init path)
+* seam continuity between faces
+* that the image circle radius matches `(width/2)` and the published `fx`
+* that `GetRay` (`camera.cpp:868`) is consistent with the equidistant model —
+  §6 item 5 predicts it already is, but that is unverified
