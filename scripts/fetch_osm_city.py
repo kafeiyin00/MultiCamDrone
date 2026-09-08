@@ -32,6 +32,7 @@ import math
 import os
 import struct
 import sys
+import zlib
 import urllib.parse
 import urllib.request
 
@@ -176,6 +177,53 @@ def triangulate(points_xy):
     if len(idx) == 3:
         tris.append((idx[0], idx[1], idx[2]))
     return tris
+
+
+# Buildings carry no material in OSM, and an untextured city renders as a white
+# blob. The parser does load a texture (gltf_data_provider.cpp:172, decoded by
+# stb through tinygltf), and each tile is limited to one primitive, so per-
+# building colour has to come from UVs into a shared palette rather than from
+# separate materials.
+#
+# Row 0 is wall colours, row 1 is roof colours; a building picks a column and
+# its UVs land in the middle of that cell.
+PALETTE_WALLS = [
+    (196, 198, 203), (168, 172, 180), (149, 156, 166), (182, 176, 168),
+    (160, 150, 140), (134, 142, 152), (176, 182, 188), (144, 148, 156),
+]
+PALETTE_ROOFS = [
+    (108, 112, 120), (92, 96, 104), (120, 116, 110), (84, 88, 96),
+    (130, 126, 118), (100, 106, 114), (114, 118, 126), (88, 92, 100),
+]
+GROUND_COLOUR = (74, 76, 80)
+PALETTE_N = len(PALETTE_WALLS) + 1          # +1 column for the ground
+PALETTE_H = 2
+
+
+def palette_uv(col, row):
+    """Centre of a palette cell, so bilinear filtering cannot bleed neighbours."""
+    return ((col + 0.5) / PALETTE_N, (row + 0.5) / PALETTE_H)
+
+
+def palette_png():
+    """The palette as a PNG, small enough to embed in every tile."""
+    rows = []
+    for r in range(PALETTE_H):
+        row = bytearray()
+        src = PALETTE_WALLS if r == 0 else PALETTE_ROOFS
+        for c in range(PALETTE_N):
+            rgb = GROUND_COLOUR if c == len(src) else src[c]
+            row += bytes(rgb) + b"\xff"
+        rows.append(bytes(row))
+    raw = b"".join(b"\x00" + r for r in rows)
+
+    def chunk(tag, data):
+        c = struct.pack(">I", len(data)) + tag + data
+        return c + struct.pack(">I", zlib.crc32(tag + data) & 0xFFFFFFFF)
+
+    hdr = struct.pack(">IIBBBBB", PALETTE_N, PALETTE_H, 8, 6, 0, 0, 0)
+    return (b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", hdr)
+            + chunk(b"IDAT", zlib.compress(raw, 9)) + chunk(b"IEND", b""))
 
 
 class TileMesh:

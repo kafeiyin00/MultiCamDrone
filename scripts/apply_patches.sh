@@ -7,8 +7,17 @@
 #   ./scripts/apply_patches.sh --revert   # take the submodule back to upstream
 #
 # ProjectAirSim is vendored as a submodule pinned to an upstream commit, so
-# local changes to it cannot be committed here. They live in patches/ instead
-# and are re-applied after a fresh clone or a submodule update.
+# local changes to it cannot be committed in this repository. They live in
+# patches/ instead and are re-applied after a fresh clone or a submodule update.
+#
+# The changes also exist as a real commit on the branch `multicamdrone/fisheye`
+# inside the submodule working copy. That branch has nowhere to be pushed until
+# a fork of iamaisim/ProjectAirSim exists under this account; see
+# docs/FISHEYE.md. Until then the patch is what survives a fresh clone, and the
+# superproject deliberately keeps pointing at the upstream commit -- recording
+# an unpushed SHA would break `git submodule update` for everyone else.
+#
+#   --refresh   regenerate the patch from the submodule's current state
 #
 # After applying, the simulator has to be rebuilt for the changes to take
 # effect -- see docs/FISHEYE.md section 7.
@@ -34,12 +43,38 @@ shopt -u nullglob
 
 MODE="apply"
 case "${1:-}" in
-  --check)  MODE="check" ;;
-  --revert) MODE="revert" ;;
+  --check)   MODE="check" ;;
+  --revert)  MODE="revert" ;;
+  --refresh) MODE="refresh" ;;
   -h|--help) sed -n '2,16p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 0 ;;
   "") ;;
-  *) die "unknown option '$1' (--check | --revert)" ;;
+  *) die "unknown option '$1' (--check | --revert | --refresh)" ;;
 esac
+
+BASE_FILE="${PATCH_DIR}/UPSTREAM_BASE"
+[[ -f "$BASE_FILE" ]] || die "missing ${BASE_FILE}; it records the upstream commit the patch applies to"
+BASE="$(tr -d '[:space:]' < "$BASE_FILE")"
+
+if [[ "$MODE" == "refresh" ]]; then
+  # Regenerate the patch from whatever the submodule currently holds. Diffing
+  # against the recorded upstream base, NOT against HEAD: once the changes are
+  # committed inside the submodule (see the fork note below) `git diff HEAD`
+  # is empty and would silently produce an empty patch.
+  git -C "$SUB" cat-file -e "${BASE}^{commit}" 2>/dev/null \
+    || die "upstream base ${BASE} is not in the submodule; fetch it first"
+
+  # Intent-to-add so new files appear in the diff without being committed.
+  mapfile -t UNTRACKED < <(git -C "$SUB" ls-files --others --exclude-standard)
+  [[ ${#UNTRACKED[@]} -gt 0 ]] && git -C "$SUB" add -N -- "${UNTRACKED[@]}"
+
+  OUT="${PATCH_DIR}/0001-fisheye-220-degree-cameras.patch"
+  git -C "$SUB" diff "$BASE" > "$OUT"
+  [[ ${#UNTRACKED[@]} -gt 0 ]] && git -C "$SUB" reset -q -- "${UNTRACKED[@]}"
+
+  files=$(grep -c '^+++ b/' "$OUT" || true)
+  ok "refreshed $(basename "$OUT"): ${files} files, $(wc -l < "$OUT") lines, against ${BASE:0:12}"
+  exit 0
+fi
 
 if [[ "$MODE" == "revert" ]]; then
   echo "Reverting ${SUB} to its pinned upstream commit"
