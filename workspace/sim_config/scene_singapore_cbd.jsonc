@@ -1,0 +1,35 @@
+{
+  "id": "SceneSingaporeCBD",
+  "actors": [
+    {
+      "type": "robot",
+      "name": "Drone1",
+      "origin": {
+        "xyz": "0 0 -260.0",
+        "rpy-deg": "0 0 0"
+      },
+      "robot-config": "robot_singapore_cbd.jsonc"
+    }
+  ],
+  "clock": {
+    "type": "steppable",
+    "step-ns": 5000000,
+    "real-time-update-rate": 5000000,
+    "pause-on-start": false
+  },
+  "home-geo-point": {
+    "latitude": 1.282,
+    "longitude": 103.851,
+    "altitude": 0
+  },
+  "segmentation": {
+    "initialize-ids": true,
+    "ignore-existing": false,
+    "use-owner-name": true
+  },
+  "scene-type": "CustomGIS",
+  "tiles-dir": "/environments/gis_tiles/singapore-cbd",
+  "tiles-lod-min": 15,
+  "tiles-lod-max": 17,
+  "tiles-dir-is-client-relative": false
+}

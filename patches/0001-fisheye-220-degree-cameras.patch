@@ -1,8 +1,8 @@
 diff --git a/core_sim/include/core_sim/sensors/camera.hpp b/core_sim/include/core_sim/sensors/camera.hpp
-index f25bf2b..0886c8a 100644
+index f25bf2b..4738697 100644
 --- a/core_sim/include/core_sim/sensors/camera.hpp
 +++ b/core_sim/include/core_sim/sensors/camera.hpp
-@@ -104,6 +104,28 @@ struct CaptureSettings {
+@@ -104,6 +104,37 @@ struct CaptureSettings {
    float target_gamma =
        2.5f;  // This would be reset to kSceneTargetGamma for scene as default
    int projection_mode = 0;  // ECameraProjectionMode::Perspective
@@ -28,14 +28,23 @@ index f25bf2b..0886c8a 100644
 +  // resolution, while a 90-degree perspective face is coarsest at its centre,
 +  // so matching a 1920-wide 220-degree output everywhere would need ~1000 px.
 +  int fisheye_face_resolution = 768;
++
++  // Exclude the robot this camera is mounted on from its own view.
++  //
++  // A real lens does see the airframe, and at 220 degrees it always does: the
++  // camera looks 20 degrees behind its own mounting plane, so rotors and arms
++  // occupy the image rim. Masking them is usually what a dataset wants, but it
++  // is a deliberate departure from what the sensor would really see, so it is
++  // opt-in rather than the default.
++  bool hide_self = false;
    float ortho_width = std::numeric_limits<float>::quiet_NaN();
    float max_depth_meters = 1.0;  // for depthvis
    float depth_of_field_focal_meters = std::numeric_limits<float>::quiet_NaN();
 diff --git a/core_sim/src/constant.hpp b/core_sim/src/constant.hpp
-index 2e15314..7e93be4 100644
+index 2e15314..f74e531 100644
 --- a/core_sim/src/constant.hpp
 +++ b/core_sim/src/constant.hpp
-@@ -188,6 +188,10 @@ class Constant {
+@@ -188,6 +188,11 @@ class Constant {
      static constexpr const char* width = "width";
      static constexpr const char* height = "height";
      static constexpr const char* fov_degrees = "fov-degrees";
@@ -43,11 +52,12 @@ index 2e15314..7e93be4 100644
 +    static constexpr const char* fisheye_model = "fisheye-model";
 +    static constexpr const char* fisheye_face_resolution =
 +        "fisheye-face-resolution";
++    static constexpr const char* hide_self = "hide-self";
      static constexpr const char* pixels_as_float = "pixels-as-float";
      static constexpr const char* compress = "compress";
      static constexpr const char* auto_exposure_method = "auto-exposure-method";
 diff --git a/core_sim/src/sensors/camera.cpp b/core_sim/src/sensors/camera.cpp
-index 3b14439..c13b8ce 100644
+index 3b14439..81c9062 100644
 --- a/core_sim/src/sensors/camera.cpp
 +++ b/core_sim/src/sensors/camera.cpp
 @@ -6,6 +6,7 @@
@@ -120,10 +130,13 @@ index 3b14439..c13b8ce 100644
  
      auto iimage_type = capture_setting.image_type;
      Topic* ptopic;
-@@ -1359,6 +1396,55 @@ void Camera::Loader::LoadCaptureSetting(const json& json) {
+@@ -1359,6 +1396,58 @@ void Camera::Loader::LoadCaptureSetting(const json& json) {
    setting.chromatic_aberration_intensity = JsonUtils::GetNumber(
        json, Constant::Config::chromatic_aberration_intensity,
        setting.chromatic_aberration_intensity);
++
++  setting.hide_self = JsonUtils::GetBoolean(json, Constant::Config::hide_self,
++                                            setting.hide_self);
 +
 +  // --- Fisheye ---------------------------------------------------------
 +  const std::string projection =
@@ -346,7 +359,7 @@ index 0000000..203947a
 +void DispatchFisheyeRemap(FRHICommandListImmediate& RHICmdList,
 +                          const FFisheyeRemapArgs& Args);
 diff --git a/unreal/Blocks/Plugins/ProjectAirSim/Source/ProjectAirSim/Private/Sensors/UnrealCamera.cpp b/unreal/Blocks/Plugins/ProjectAirSim/Source/ProjectAirSim/Private/Sensors/UnrealCamera.cpp
-index 3800a7c..5a21a94 100644
+index 3800a7c..adce485 100644
 --- a/unreal/Blocks/Plugins/ProjectAirSim/Source/ProjectAirSim/Private/Sensors/UnrealCamera.cpp
 +++ b/unreal/Blocks/Plugins/ProjectAirSim/Source/ProjectAirSim/Private/Sensors/UnrealCamera.cpp
 @@ -25,6 +25,7 @@
@@ -357,8 +370,13 @@ index 3800a7c..5a21a94 100644
  #include "UnrealCameraRenderRequest.h"
  #include "UnrealCompatibility.h"
  #include "UnrealHelpers.h"
-@@ -334,9 +335,191 @@ void UUnrealCamera::SetupCameraFromSettings(
+@@ -332,11 +333,225 @@ void UUnrealCamera::SetupCameraFromSettings(
+                           CaptureSetting);
+     }
  
++    if (CaptureSetting.hide_self && GetOwner() != nullptr)
++      Capture->HideActorComponents(GetOwner());
++
      Capture->TextureTarget = RenderTargets[ImageType];
    }
 +
@@ -469,8 +487,37 @@ index 3800a7c..5a21a94 100644
 +    FaceCapture->SetRelativeRotation(kFisheyeFaceRotations[i]);
 +    if (!CaptureSetting.show_debug_plots)
 +      HideDebugDrawComponent(FaceCapture, GetWorld());
++
++    // Same mechanism the depth lidar uses to keep its own airframe out of its
++    // returns (DepthLidar.cpp). At 220 degrees the rotors and arms otherwise
++    // fill the image rim, because the camera sees behind its mounting plane.
++    if (CaptureSetting.hide_self && GetOwner() != nullptr)
++      FaceCapture->HideActorComponents(GetOwner());
 +    UpdateCameraPostProcessingSetting(FaceCapture->PostProcessSettings,
 +                                      CaptureSetting);
++
++    // Screen-space *lens* effects must not run per face. Each face is only a
++    // sampling of scene radiance; a real fisheye has one lens, and its effects
++    // belong on the assembled image.
++    //
++    // Vignetting is the one that shows: it darkens each face towards its own
++    // border, and face borders are exactly where the seams are, so the
++    // composite grows a dark crease along every seam. Measured on the ground
++    // plane before this was disabled, luminance fell monotonically from 109.5
++    // at face centres to 90.1 at the seams -- a 19% dip with no step, which is
++    // why it reads as a fold rather than a join.
++    //
++    // Bloom and chromatic aberration are wrong per face for the same reason:
++    // both would bleed or split colour relative to each face's own frame
++    // rather than the fisheye's.
++    FPostProcessSettings& FacePP = FaceCapture->PostProcessSettings;
++    FacePP.bOverride_VignetteIntensity = true;
++    FacePP.VignetteIntensity = 0.0f;
++    FacePP.bOverride_BloomIntensity = true;
++    FacePP.BloomIntensity = 0.0f;
++    FacePP.bOverride_SceneFringeIntensity = true;
++    FacePP.SceneFringeIntensity = 0.0f;
++
 +    FaceCapture->Activate();
 +
 +    FisheyeFaceCaptures.Add(FaceCapture);
@@ -549,7 +596,7 @@ index 3800a7c..5a21a94 100644
  void UUnrealCamera::SetRelativePoseFromNed(
      const projectairsim::Transform& PoseNed) {
    // Apply camera origin offset from the parent (either the parent link or
-@@ -761,7 +944,18 @@ void UUnrealCamera::TickComponent(
+@@ -761,7 +976,18 @@ void UUnrealCamera::TickComponent(
        }
  
        if (bEnable) {
@@ -569,7 +616,7 @@ index 3800a7c..5a21a94 100644
          bCaptureIsActive = true;
        }
      }
-@@ -795,6 +989,9 @@ void UUnrealCamera::TickComponent(
+@@ -795,6 +1021,9 @@ void UUnrealCamera::TickComponent(
        ENQUEUE_RENDER_COMMAND(SceneDrawCompletion)
        ([this, CapturedCameraTransform, Annotations = std::move(Annotations)](
             FRHICommandListImmediate& RHICmdList) {
@@ -579,7 +626,7 @@ index 3800a7c..5a21a94 100644
          this->OnRendered(CapturedCameraTransform, Annotations);
        });
      }
-@@ -1072,7 +1269,10 @@ void UUnrealCamera::CalculateProjectionMatrix() {
+@@ -1072,7 +1301,10 @@ void UUnrealCamera::CalculateProjectionMatrix() {
    ViewInfo.Location = CaptureComp->GetComponentTransform().GetLocation();
    ViewInfo.Rotation =
        CaptureComp->GetComponentTransform().GetRotation().Rotator();
@@ -591,7 +638,7 @@ index 3800a7c..5a21a94 100644
    ViewInfo.ProjectionMode = CaptureComp->ProjectionType;
    ViewInfo.AspectRatio =
        float(RenderTexture->SizeX) / float(RenderTexture->SizeY);
-@@ -1094,7 +1294,13 @@ void UUnrealCamera::ComputeFrustumVertices() {
+@@ -1094,7 +1326,13 @@ void UUnrealCamera::ComputeFrustumVertices() {
      FrustumInfo Info;
      USceneCaptureComponent2D* CaptureComp = Captures[ImageType];
  

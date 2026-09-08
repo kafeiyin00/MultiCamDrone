@@ -76,6 +76,12 @@ def camera(name: str, eye: dict, args) -> dict:
         "pixels-as-float": False,
         "compress": False,
         "target-gamma": 2.5,
+        # A real lens does see the airframe, and at 220 degrees it always does:
+        # the camera looks 20 degrees behind its own mounting plane. Masking it
+        # is usually what a dataset wants, so this defaults on -- but it is
+        # written into the config rather than assumed, and --no-hide-self keeps
+        # the physically faithful view.
+        "hide-self": args.hide_self,
     }
     if args.projection == "fisheye":
         # Requires the patched plugin. A stock Project AirSim ignores these
@@ -128,6 +134,12 @@ def main() -> int:
                     help="IMU Hz; this sets the scene clock, which also caps "
                          "the physics rate")
     ap.add_argument("--name", default="multicam_drone")
+    ap.add_argument("--hide-self", action="store_true", default=True,
+                    help="keep the drone's own airframe out of its cameras "
+                         "(default). At 220 degrees the rotors and arms fill "
+                         "the image rim otherwise")
+    ap.add_argument("--no-hide-self", dest="hide_self", action="store_false",
+                    help="render the airframe, as a real lens would see it")
     ap.add_argument("--mount-radius", type=float, default=MOUNT_RADIUS,
                     help="metres from the body origin along each axis; must clear "
                          "the frame mesh or the drone occludes its own cameras "
@@ -182,6 +194,7 @@ def main() -> int:
     if args.projection == "fisheye":
         print(f"  model     : {args.fisheye_model}, "
               f"{args.fisheye_face_resolution}px faces x5 per eye")
+    print(f"  airframe  : {'hidden from its own cameras' if args.hide_self else 'visible (as a real lens sees it)'}")
     print(f"  IMU       : {args.imu_rate:g}Hz (scene clock step {step_ns} ns)")
     print(f"  robot     : {robot_path}")
     print(f"  scene     : {scene_path}")

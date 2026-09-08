@@ -7,6 +7,9 @@
 # scripts/fetch_engine.sh (needs a GitHub account linked to Epic Games).
 /engine/
 
+# Generated GIS tile sets live under envs/gis_tiles/ and are ignored with the
+# rest of envs/. scripts/fetch_osm_city.py rebuilds them from OpenStreetMap.
+
 # --- Large binary assets: pre-built Unreal environments and their archives ---
 # These are multi-GB downloads from the Project AirSim releases page and are
 # re-fetchable with scripts/fetch_env.sh, so they stay out of git.

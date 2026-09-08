@@ -91,7 +91,11 @@ elif [[ "$busy" -eq 1 ]]; then
   fail "load is ${load} on ${cores} cores — rate numbers would be meaningless"
   note "wait for whatever is loading the machine (an Unreal build?) to finish"
 else
-  for t in "sensors/front/scene_camera:30" "sensors/IMU1/imu:200"; do
+  # Camera target is 20 Hz by design, not 30: see docs/FISHEYE.md 8.4 for why
+  # 30 needs a renderer-count change rather than a config tweak. Override with
+  # CAM_TARGET_HZ / IMU_TARGET_HZ.
+  for t in "sensors/front/scene_camera:${CAM_TARGET_HZ:-20}" \
+           "sensors/IMU1/imu:${IMU_TARGET_HZ:-200}"; do
     topic="${t%%:*}"; target="${t##*:}"
     hz=$("${COMPOSE[@]}" exec -T ros2 bash -lc "
       source /opt/ros/humble/setup.bash
