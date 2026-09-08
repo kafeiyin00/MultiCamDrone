@@ -1,3 +1,4 @@
 [submodule "ProjectAirSim"]
 	path = ProjectAirSim
-	url = https://github.com/iamaisim/ProjectAirSim.git
+	url = git@github.com:kafeiyin00/ProjectAirSim.git
+	branch = multicamdrone/fisheye

@@ -10,12 +10,14 @@
 # local changes to it cannot be committed in this repository. They live in
 # patches/ instead and are re-applied after a fresh clone or a submodule update.
 #
-# The changes also exist as a real commit on the branch `multicamdrone/fisheye`
-# inside the submodule working copy. That branch has nowhere to be pushed until
-# a fork of iamaisim/ProjectAirSim exists under this account; see
-# docs/FISHEYE.md. Until then the patch is what survives a fresh clone, and the
-# superproject deliberately keeps pointing at the upstream commit -- recording
-# an unpushed SHA would break `git submodule update` for everyone else.
+# As of the fork, the submodule points at kafeiyin00/ProjectAirSim branch
+# `multicamdrone/fisheye`, so a normal `git submodule update --init` already
+# brings the changes down and the patch is NOT needed for a fresh clone.
+#
+# The patch is kept for two things the submodule pointer cannot do: reviewing
+# the delta against upstream in one file, and re-applying the work on top of a
+# newer upstream commit. `upstream` in the submodule still points at
+# iamaisim/ProjectAirSim for exactly that.
 #
 #   --refresh   regenerate the patch from the submodule's current state
 #
