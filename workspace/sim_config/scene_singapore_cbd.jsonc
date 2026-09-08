@@ -5,7 +5,7 @@
       "type": "robot",
       "name": "Drone1",
       "origin": {
-        "xyz": "0 0 -320.0",
+        "xyz": "0 0 -3.0",
         "rpy-deg": "0 0 0"
       },
       "robot-config": "robot_singapore_cbd.jsonc"
@@ -18,8 +18,8 @@
     "pause-on-start": false
   },
   "home-geo-point": {
-    "latitude": 1.282,
-    "longitude": 103.851,
+    "latitude": 1.27217,
+    "longitude": 103.85192,
     "altitude": 0
   },
   "segmentation": {

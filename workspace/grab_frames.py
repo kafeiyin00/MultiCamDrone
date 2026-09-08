@@ -15,7 +15,10 @@ from rclpy.qos import QoSProfile, ReliabilityPolicy
 from sensor_msgs.msg import Image
 
 OUT = os.environ.get("GRAB_OUT_DIR", "/output/frames")
-SCENE = os.environ.get("SCENE_NAME", "SceneMulticamDrone")
+# The bridge strips /Sim/<SceneId>, so ROS topic names carry no scene id and
+# this works whatever scene is loaded. SCENE_NAME only matters if the bridge is
+# run with SCENE_IN_TOPIC_PATH=1.
+SCENE = os.environ.get("SCENE_NAME", "")
 EYES = ["front", "right", "back", "left"]
 
 
@@ -34,7 +37,9 @@ def main():
     os.makedirs(OUT, exist_ok=True)
     rclpy.init()
     node = Node("grab_frames")
-    root = f"/ProjectAirsim/{SCENE}/robots/{os.environ.get('VEHICLE', 'Drone1')}"
+    vehicle = os.environ.get("VEHICLE", "Drone1")
+    root = (f"/ProjectAirsim/{SCENE}/robots/{vehicle}" if SCENE
+            else f"/ProjectAirsim/robots/{vehicle}")
     got = {}
 
     # Image publishers use KEEP_LAST with a shallow depth; best effort is enough
