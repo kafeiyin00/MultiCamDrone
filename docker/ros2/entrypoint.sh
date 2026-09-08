@@ -66,16 +66,43 @@ ensure_built() {
   fi
 }
 
+# The bridge rewrites /Sim/<SceneId>/... to <ros_topic_root>/<SceneId>/..., so
+# the scene id lands in every ROS topic name and a Foxglove layout breaks the
+# moment the scene changes. Stripping /Sim/<SceneId> instead makes the names
+# scene-independent, which is what a saved layout needs. Set
+# SCENE_IN_TOPIC_PATH=1 to keep the upstream behaviour.
+derive_topic_root() {
+  local root="/Sim"
+  if [[ "${SCENE_IN_TOPIC_PATH:-0}" != "1" && -n "$SCENE_CONFIG" ]]; then
+    local cfg="${SIM_CONFIG_PATH}/${SCENE_CONFIG}"
+    if [[ -f "$cfg" ]]; then
+      local scene_id
+      scene_id="$(python3 -c "
+import json,re,sys
+try:
+    print(json.loads(re.sub(r'(?<!:)//.*','',open(sys.argv[1]).read())).get('id',''))
+except Exception:
+    pass" "$cfg" 2>/dev/null)"
+      [[ -n "$scene_id" ]] && root="/Sim/${scene_id}"
+    fi
+  fi
+  echo "$root"
+}
+
 run_projectairsim_bridge() {
   # The parameter is declared as a double, so "0" is rejected outright with
   # "setting it to {integer} is not allowed". Force a decimal point.
   local refresh_sec="$REFRESH_TOPICS_SEC"
   [[ "$refresh_sec" == *.* ]] || refresh_sec="${refresh_sec}.0"
 
+  local topic_root
+  topic_root="$(derive_topic_root)"
+
   local args=(
     -p "address:=${SIM_ADDRESS}"
     -p "sim_config_path:=${SIM_CONFIG_PATH}"
     -p "refresh_topics_period_sec:=${refresh_sec}"
+    -p "projectairsim_topic_root:=${topic_root}"
   )
   # With no scene_config the bridge attaches to whatever scene is already
   # loaded instead of replacing it.
@@ -84,6 +111,7 @@ run_projectairsim_bridge() {
 
   echo "[info] Project AirSim bridge -> ${SIM_ADDRESS}:8989/8990"
   echo "[info] scene_config='${SCENE_CONFIG:-<attach to loaded scene>}'"
+  echo "[info] topic root  : ${topic_root} -> /ProjectAirsim"
   ros2 run "$PKG" projectairsim_ros2_cpp_node --ros-args "${args[@]}"
 }
 

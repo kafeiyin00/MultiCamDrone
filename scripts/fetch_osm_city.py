@@ -242,7 +242,31 @@ class TileMesh:
             self.idx.extend((base + a, base + b, base + c))
 
 
-def build_building(ring_latlon, height, mesh):
+def tile_bounds(x, y, lod):
+    """Lat/lon corners of a Web-Mercator tile."""
+    n = 1 << lod
+    def lon(i): return i / n * 360.0 - 180.0
+    def lat(j):
+        t = math.pi * (1 - 2 * j / n)
+        return math.degrees(math.atan(math.sinh(t)))
+    return lat(y + 1), lon(x), lat(y), lon(x + 1)   # south, west, north, east
+
+
+def build_ground(x, y, lod, mesh):
+    """A flat quad covering one tile at sea level.
+
+    Without it the city is buildings floating over a void: the drone falls
+    straight through, since tiles are the only collision geometry a GIS scene
+    has. Two triangles per tile is enough -- the surface is flat.
+    """
+    south, west, north, east = tile_bounds(x, y, lod)
+    corners = [(south, west), (south, east), (north, east), (north, west)]
+    uv = palette_uv(PALETTE_N - 1, 0)      # the ground column
+    positions = [geodetic_to_ecef(lat, lon, 0.0) for lat, lon in corners]
+    mesh.add(positions, [uv] * 4, [(0, 1, 2), (0, 2, 3)])
+
+
+def build_building(ring_latlon, height, mesh, colour=0):
     """Walls plus a flat roof for one footprint, appended to `mesh`."""
     # Drop the repeated closing node OSM includes.
     ring = ring_latlon[:-1] if (len(ring_latlon) > 3
@@ -258,6 +282,9 @@ def build_building(ring_latlon, height, mesh):
     local = [(((p[1] - lon0) * m_per_deg_lon), ((p[0] - lat0) * m_per_deg_lat))
              for p in ring]
 
+    wall_uv = palette_uv(colour, 0)
+    roof_uv = palette_uv(colour, 1)
+
     # --- walls: one quad per edge -------------------------------------
     positions, uvs, tris = [], [], []
     run = 0.0
@@ -270,11 +297,11 @@ def build_building(ring_latlon, height, mesh):
         for (lat, lon), u in (((ring[i][0], ring[i][1]), run),
                               ((ring[j][0], ring[j][1]), run + seg)):
             positions.append(geodetic_to_ecef(lat, lon, 0.0))
-            uvs.append((u / UV_METRES_PER_TILE, 0.0))
+            uvs.append(wall_uv)
         for (lat, lon), u in (((ring[i][0], ring[i][1]), run),
                               ((ring[j][0], ring[j][1]), run + seg)):
             positions.append(geodetic_to_ecef(lat, lon, height))
-            uvs.append((u / UV_METRES_PER_TILE, height / UV_METRES_PER_TILE))
+            uvs.append(wall_uv)
         # b+0 bottom-i, b+1 bottom-j, b+2 top-i, b+3 top-j
         tris.append((b + 0, b + 1, b + 3))
         tris.append((b + 0, b + 3, b + 2))
@@ -286,7 +313,7 @@ def build_building(ring_latlon, height, mesh):
         b = len(positions)
         for (lat, lon), (lx, ly) in zip(ring, local):
             positions.append(geodetic_to_ecef(lat, lon, height))
-            uvs.append((lx / UV_METRES_PER_TILE, ly / UV_METRES_PER_TILE))
+            uvs.append(roof_uv)
         for a, bb, c in roof_tris:
             tris.append((b + a, b + bb, b + c))
 
@@ -324,6 +351,10 @@ def write_glb(path, mesh):
     mins = [min(v[i] for v in mesh.pos) for i in range(3)]
     maxs = [max(v[i] for v in mesh.pos) for i in range(3)]
 
+    png = palette_png()
+    png_off = len(blob)
+    blob = blob + png + b"\x00" * ((4 - len(png) % 4) % 4)
+
     gltf = {
         "asset": {"version": "2.0", "generator": "MultiCamDrone fetch_osm_city"},
         "scene": 0,
@@ -334,14 +365,25 @@ def write_glb(path, mesh):
         "meshes": [{"primitives": [{
             "attributes": {"POSITION": 0, "TEXCOORD_0": 1},
             "indices": 2,
+            "material": 0,
             "mode": 4,
         }]}],
+        "materials": [{"pbrMetallicRoughness": {
+            "baseColorTexture": {"index": 0},
+            "metallicFactor": 0.0, "roughnessFactor": 0.9}}],
+        "textures": [{"source": 0, "sampler": 0}],
+        # NEAREST: the palette is one texel per colour, so any filtering would
+        # blend neighbouring entries into each other.
+        "samplers": [{"magFilter": 9728, "minFilter": 9728,
+                      "wrapS": 33071, "wrapT": 33071}],
+        "images": [{"bufferView": 3, "mimeType": "image/png"}],
         "buffers": [{"byteLength": len(blob)}],
         "bufferViews": [
             {"buffer": 0, "byteOffset": 0, "byteLength": len(pos), "target": 34962},
             {"buffer": 0, "byteOffset": len(pos), "byteLength": len(uv), "target": 34962},
             {"buffer": 0, "byteOffset": len(pos) + len(uv), "byteLength": len(idx),
              "target": 34963},
+            {"buffer": 0, "byteOffset": png_off, "byteLength": len(png)},
         ],
         "accessors": [
             {"bufferView": 0, "componentType": 5126, "count": len(mesh.pos),
@@ -371,6 +413,9 @@ def main() -> int:
     ap.add_argument("--name", default=None, help="output directory name")
     ap.add_argument("--lod-min", type=int, default=15)
     ap.add_argument("--lod-max", type=int, default=17)
+    ap.add_argument("--no-ground", action="store_true",
+                    help="omit the ground quads. Buildings then float over a "
+                         "void and anything with physics falls through")
     ap.add_argument("--out-root", default=None)
     args = ap.parse_args()
 
@@ -407,6 +452,18 @@ def main() -> int:
     skipped = 0
     for lod in range(args.lod_min, args.lod_max + 1):
         tiles = {}
+
+        # Ground first, for every tile the bbox touches -- not just the ones
+        # with buildings. Tiles are the only collision geometry a GIS scene
+        # has, so gaps are holes the drone falls through.
+        if not args.no_ground:
+            x0, y0 = lonlat_to_tile(west, north, lod)
+            x1, y1 = lonlat_to_tile(east, south, lod)
+            for tx in range(min(x0, x1), max(x0, x1) + 1):
+                for ty in range(min(y0, y1), max(y0, y1) + 1):
+                    build_ground(tx, ty, lod, tiles.setdefault((tx, ty), TileMesh()))
+                    total_tris += 2
+
         for way in ways:
             geom = way.get("geometry")
             if not geom or len(geom) < 4:
@@ -416,8 +473,11 @@ def main() -> int:
             clat = sum(p[0] for p in ring) / len(ring)
             clon = sum(p[1] for p in ring) / len(ring)
             key = lonlat_to_tile(clon, clat, lod)
+            # Stable per-building colour: keyed on the OSM id so the same
+            # building keeps its colour across LODs and across re-runs.
+            colour = way.get("id", 0) % len(PALETTE_WALLS)
             tris = build_building(ring, parse_height(way.get("tags", {})),
-                                  tiles.setdefault(key, TileMesh()))
+                                  tiles.setdefault(key, TileMesh()), colour)
             if tris == 0:
                 skipped += 1
             total_tris += tris

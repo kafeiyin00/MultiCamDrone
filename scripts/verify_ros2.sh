@@ -46,8 +46,15 @@ else
   fail "port 8765 is not listening"
 fi
 
-hdr "3. Bridged topics for ${SCENE}"
-ROOT="/ProjectAirsim/${SCENE}/robots/${VEHICLE:-Drone1}"
+# The bridge now strips /Sim/<SceneId>, so ROS names carry no scene id and a
+# layout survives a scene change. SCENE_IN_TOPIC_PATH=1 restores the old shape.
+if [[ "${SCENE_IN_TOPIC_PATH:-0}" == "1" ]]; then
+  ROOT="/ProjectAirsim/${SCENE}/robots/${VEHICLE:-Drone1}"
+else
+  ROOT="/ProjectAirsim/robots/${VEHICLE:-Drone1}"
+fi
+
+hdr "3. Bridged topics under ${ROOT}"
 topics="$("${COMPOSE[@]}" exec -T ros2 bash -lc '
   source /opt/ros/humble/setup.bash
   source /workspace/ProjectAirSim/ros/install/setup.bash
@@ -72,12 +79,6 @@ else
   [[ "$n_info" -ge 4 ]] && pass "camera_info on $n_info topics" \
                         || fail "only $n_info camera_info topics"
 
-  # Topic registrations survive scene reloads inside a single sim process, so
-  # stale scenes hanging around means the sim has been reused across configs.
-  stale=$(grep -o '/ProjectAirsim/Scene[A-Za-z]*' <<< "$topics" | sort -u | grep -cv "$SCENE")
-  if [[ "$stale" -gt 0 ]]; then
-    note "$stale other scene(s) still advertised; restart the sim to clear them"
-  fi
 fi
 
 hdr "4. Rates"
